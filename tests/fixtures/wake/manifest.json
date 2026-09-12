@@ -1,0 +1,69 @@
+{
+  "phrase": "你好，声伴",
+  "cases": [
+    {
+      "name": "positive-taiwan-chen",
+      "text": "你好，声伴",
+      "voice": "zh-TW-HsiaoChenNeural",
+      "expected": true
+    },
+    {
+      "name": "positive-taiwan-yu",
+      "text": "你好，声伴",
+      "voice": "zh-TW-HsiaoYuNeural",
+      "expected": true
+    },
+    {
+      "name": "positive-mainland",
+      "text": "你好，声伴",
+      "voice": "zh-CN-XiaoxiaoNeural",
+      "expected": true
+    },
+    {
+      "name": "negative-normal",
+      "text": "请帮我把今天的工作整理一下，先看看文件里面有什么内容。",
+      "voice": "zh-TW-HsiaoChenNeural",
+      "expected": false
+    },
+    {
+      "name": "negative-close-boss",
+      "text": "你好，老板。",
+      "voice": "zh-TW-HsiaoChenNeural",
+      "expected": false
+    },
+    {
+      "name": "negative-close-how",
+      "text": "你好，怎么办。",
+      "voice": "zh-TW-HsiaoChenNeural",
+      "expected": false
+    },
+    {
+      "name": "negative-half",
+      "text": "你好。",
+      "voice": "zh-TW-HsiaoChenNeural",
+      "expected": false
+    },
+    {
+      "name": "negative-name",
+      "text": "声伴。",
+      "voice": "zh-TW-HsiaoChenNeural",
+      "expected": false
+    },
+    {
+      "name": "negative-ack",
+      "text": "在。请告诉我，你想了解什么。",
+      "voice": "zh-TW-HsiaoChenNeural",
+      "expected": false
+    },
+    {
+      "name": "negative-noise",
+      "text": "generated pink noise",
+      "expected": false
+    },
+    {
+      "name": "negative-silence",
+      "text": "generated silence",
+      "expected": false
+    }
+  ]
+}

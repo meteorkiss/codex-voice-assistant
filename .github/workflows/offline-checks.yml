@@ -1,0 +1,21 @@
+name: Offline Windows checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check source and dependency layout
+        shell: powershell
+        run: ./tools/Test-SourceLayout.ps1
+      - name: Run isolated offline regressions
+        shell: powershell
+        run: ./tests/Invoke-BindingChecks.ps1

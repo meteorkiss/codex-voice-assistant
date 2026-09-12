@@ -1,0 +1,9 @@
+[
+  {"id":"zh-TW-HsiaoChenNeural","name":"台湾女声 · 晓臻","locale":"zh-TW","gender":"Female"},
+  {"id":"zh-TW-HsiaoYuNeural","name":"台湾女声 · 晓雨","locale":"zh-TW","gender":"Female"},
+  {"id":"zh-TW-YunJheNeural","name":"台湾男声 · 云哲","locale":"zh-TW","gender":"Male"},
+  {"id":"zh-CN-XiaoxiaoNeural","name":"普通话女声 · 晓晓","locale":"zh-CN","gender":"Female"},
+  {"id":"zh-CN-YunxiNeural","name":"普通话男声 · 云希","locale":"zh-CN","gender":"Male"},
+  {"id":"en-US-JennyNeural","name":"英语女声 · Jenny","locale":"en-US","gender":"Female"},
+  {"id":"en-US-GuyNeural","name":"英语男声 · Guy","locale":"en-US","gender":"Male"}
+]

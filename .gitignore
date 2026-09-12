@@ -1,0 +1,22 @@
+# Local runtime and private state
+/runtime/
+/data/
+/work/
+/outputs/
+
+# Generated files
+__pycache__/
+*.py[cod]
+*.lnk
+*.exe
+*.dll
+*.pdb
+*.tmp
+*.log
+.env
+.env.*
+!.env.example
+
+# Optional voice experiments; not part of the source release
+/assets/local-voices/
+/assets/ack-local-*.wav

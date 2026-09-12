@@ -1,0 +1,103 @@
+﻿<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Name="SettingsWindow" Title="声伴设置" Width="730" Height="640" MinWidth="500" MinHeight="440"
+        WindowStartupLocation="CenterScreen" ShowInTaskbar="False" Background="#F5F5F7"
+        FontFamily="Microsoft YaHei UI" FontSize="13" Foreground="#242426" UseLayoutRounding="True">
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Padding" Value="12,5"/><Setter Property="MinHeight" Value="29"/><Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="Foreground" Value="#242426"/><Setter Property="BorderBrush" Value="#CECED2"/><Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+        <Border Name="ButtonSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ButtonSurface" Property="Opacity" Value="0.85"/></Trigger>
+          <Trigger Property="IsPressed" Value="True"><Setter TargetName="ButtonSurface" Property="Opacity" Value="0.65"/></Trigger>
+          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="ButtonSurface" Property="BorderBrush" Value="#007AFF"/></Trigger>
+          <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="ComboBoxItem"><Setter Property="Padding" Value="9,6"/><Setter Property="MinHeight" Value="29"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem"><Border Name="ItemSurface" Background="Transparent" CornerRadius="4" Padding="{TemplateBinding Padding}"><ContentPresenter/></Border><ControlTemplate.Triggers><Trigger Property="IsHighlighted" Value="True"><Setter TargetName="ItemSurface" Property="Background" Value="#ECECF0"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="ItemSurface" Property="Background" Value="#E5EFFF"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>
+    <Style TargetType="ComboBox">
+      <Setter Property="MinHeight" Value="31"/><Setter Property="Padding" Value="9,5"/><Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="#CECED2"/><Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="MaxDropDownHeight" Value="280"/><Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox"><Grid>
+        <ToggleButton Name="ComboToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+          <ToggleButton.Template><ControlTemplate TargetType="ToggleButton"><Border Name="SelectSurface" Background="#FFFFFF" BorderBrush="#CECED2" BorderThickness="1" CornerRadius="5"><TextBlock Text="⌄" FontFamily="Segoe UI" Foreground="#66666B" FontSize="14" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,-3,9,0"/></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="SelectSurface" Property="Background" Value="#FAFAFC"/></Trigger></ControlTemplate.Triggers></ControlTemplate></ToggleButton.Template>
+        </ToggleButton>
+        <ContentPresenter Name="SelectionContent" IsHitTestVisible="False" Margin="10,0,29,0" HorizontalAlignment="Left" VerticalAlignment="Center" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"/>
+        <TextBox Name="PART_EditableTextBox" Visibility="Hidden" Background="Transparent" BorderThickness="0" Padding="0" Margin="10,0,29,0" VerticalAlignment="Center" IsReadOnly="{TemplateBinding IsReadOnly}"/>
+        <Popup Name="PART_Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="None">
+          <Border Background="White" BorderBrush="#C9C9CE" BorderThickness="1" CornerRadius="6" Padding="3" Margin="0,3,0,0" MinWidth="{TemplateBinding ActualWidth}"><ScrollViewer MaxHeight="{TemplateBinding MaxDropDownHeight}" CanContentScroll="True" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer></Border>
+        </Popup>
+      </Grid><ControlTemplate.Triggers><Trigger Property="IsEditable" Value="True"><Setter TargetName="SelectionContent" Property="Visibility" Value="Hidden"/><Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="TextBox"><Setter Property="Padding" Value="9,6"/><Setter Property="Background" Value="#FFFFFF"/><Setter Property="BorderBrush" Value="#D5D5DA"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CaretBrush" Value="#007AFF"/><Setter Property="SelectionBrush" Value="#B9D9FF"/></Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="MinHeight" Value="37"/><Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="ContentTemplate"><Setter.Value><DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap"/></DataTemplate></Setter.Value></Setter>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="CheckBox"><Grid Background="Transparent"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" VerticalAlignment="Center" Margin="0,7,18,7"/><Border Name="SwitchTrack" Grid.Column="1" Width="32" Height="19" Background="#C7C7CC" CornerRadius="10" VerticalAlignment="Center"><Ellipse Name="SwitchThumb" Width="15" Height="15" Fill="White" HorizontalAlignment="Left" Margin="2,0"/></Border></Grid><ControlTemplate.Triggers><Trigger Property="IsChecked" Value="True"><Setter TargetName="SwitchTrack" Property="Background" Value="#007AFF"/><Setter TargetName="SwitchThumb" Property="HorizontalAlignment" Value="Right"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="SectionLabel" TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="Foreground" Value="#737378"/><Setter Property="Margin" Value="2,0,0,8"/></Style>
+    <Style x:Key="SettingsGroup" TargetType="Border"><Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="#DEDEE2"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="8"/><Setter Property="Padding" Value="15,5"/></Style>
+    <Style x:Key="Divider" TargetType="Border"><Setter Property="Height" Value="1"/><Setter Property="Background" Value="#E8E8ED"/></Style>
+    <Style x:Key="Note" TargetType="TextBlock"><Setter Property="FontSize" Value="11"/><Setter Property="Foreground" Value="#76767C"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
+    <Style x:Key="NavItem" TargetType="ListBoxItem"><Setter Property="Padding" Value="12,10"/><Setter Property="Margin" Value="0,2"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><Border Name="NavSurface" Background="Transparent" CornerRadius="6" Padding="{TemplateBinding Padding}"><ContentPresenter/></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="NavSurface" Property="Background" Value="#E2E2E7"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="NavSurface" Property="Background" Value="#007AFF"/><Setter Property="Foreground" Value="White"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>
+  </Window.Resources>
+  <Grid Name="SettingsRoot" Background="#F5F5F7"><Grid.ColumnDefinitions><ColumnDefinition Width="145"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Border Background="#ECECEF" BorderBrush="#D8D8DD" BorderThickness="0,0,1,0"><DockPanel Margin="12,24,12,16">
+      <TextBlock DockPanel.Dock="Top" Text="声伴" FontSize="16" FontWeight="SemiBold" Margin="12,0,0,22"/>
+      <ListBox Name="SettingsNavigation" Background="Transparent" BorderThickness="0" SelectedIndex="0" ItemContainerStyle="{StaticResource NavItem}" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="设置分类">
+        <ListBoxItem Name="ConnectionNavItem" Content="连接"/>
+        <ListBoxItem Name="SoundNavItem" Content="声音"/>
+        <ListBoxItem Name="AppearanceNavItem" Content="外观"/>
+      </ListBox>
+    </DockPanel></Border>
+    <DockPanel Grid.Column="1" Margin="25,25,23,17">
+      <TextBlock Name="SettingsPageTitle" DockPanel.Dock="Top" Text="连接" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,22"/>
+      <StackPanel DockPanel.Dock="Bottom" Margin="1,16,0,0"><TextBlock Name="StatusLabel" Text="等待连接" Foreground="#68686E" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="FooterHint" Text="唤醒词需点保存；其他设置自动保存。" Foreground="#8A8A90" FontSize="11" TextWrapping="Wrap" Margin="0,5,0,0"/></StackPanel>
+      <Grid>
+        <ScrollViewer Name="ConnectionPage" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,3,0">
+          <StackPanel><TextBlock Text="Codex" Style="{StaticResource SectionLabel}"/>
+            <Border Style="{StaticResource SettingsGroup}"><StackPanel>
+              <TextBlock Text="工作目录" Margin="0,10,0,8"/><ComboBox Name="DirectoryCombo" AutomationProperties.Name="按工作目录筛选现有任务"/>
+              <TextBlock Text="只筛选现有任务，不改变任务目录。" Style="{StaticResource Note}" Margin="0,7,0,13"/>
+              <Border Style="{StaticResource Divider}"/>
+              <TextBlock Text="目标任务" Margin="0,13,0,8"/><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><ComboBox Name="TaskCombo" IsEditable="True" IsReadOnly="True" IsTextSearchEnabled="True" AutomationProperties.Name="目标 Codex 任务"/><Button Name="RefreshTasksButton" Grid.Column="1" Content="刷新" Margin="8,0,0,0"/></Grid>
+              <Button Name="BindTaskButton" Content="连接所选任务" HorizontalAlignment="Right" Background="#007AFF" Foreground="White" BorderBrush="#0072EC" Margin="0,12,0,10"/>
+            </StackPanel></Border>
+            <TextBlock Text="当前连接" Style="{StaticResource SectionLabel}" Margin="2,23,0,8"/>
+            <Border Style="{StaticResource SettingsGroup}"><StackPanel><TextBlock Name="TaskLabel" Text="尚未选择任务" Margin="0,10,0,5" TextWrapping="Wrap"/><TextBlock Name="BoundDirectoryLabel" Style="{StaticResource Note}" Margin="0,0,0,12"/><Border Style="{StaticResource Divider}"/><Button Name="OpenTaskButton" Content="在 Codex 中打开" HorizontalAlignment="Right" Margin="0,10,0,7"/></StackPanel></Border>
+          </StackPanel>
+        </ScrollViewer>
+        <ScrollViewer Name="SoundPage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,3,0">
+          <StackPanel><TextBlock Text="朗读" Style="{StaticResource SectionLabel}"/>
+            <Border Style="{StaticResource SettingsGroup}"><StackPanel>
+              <Grid Margin="0,6"><Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="声音" VerticalAlignment="Center"/><ComboBox Name="VoiceCombo" Grid.Column="1" AutomationProperties.Name="朗读声音"/></Grid><Border Style="{StaticResource Divider}"/>
+              <Grid Margin="0,6"><Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="语速" VerticalAlignment="Center"/><ComboBox Name="RateCombo" Grid.Column="1" AutomationProperties.Name="朗读语速"/></Grid><Border Style="{StaticResource Divider}"/>
+              <CheckBox Name="AutoReadToggle" Content="自动朗读回答" IsChecked="True" MinHeight="33"/><Border Style="{StaticResource Divider}"/>
+              <Button Name="PreviewVoiceButton" Content="试听声音" HorizontalAlignment="Right" Margin="0,5,0,5"/>
+            </StackPanel></Border>
+            <TextBlock Text="语音输入" Style="{StaticResource SectionLabel}" Margin="2,10,0,8"/>
+            <Border Style="{StaticResource SettingsGroup}"><StackPanel>
+              <CheckBox Name="HandsFreeToggle" Content="语音唤醒" MinHeight="33"/><Border Style="{StaticResource Divider}"/>
+              <Grid Name="WakePhraseRow" Margin="0,6"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="唤醒词" VerticalAlignment="Center"/><TextBox Name="WakePhraseBox" Grid.Column="1" Text="你好声伴" IsReadOnly="False" MinHeight="31" Padding="8,5" VerticalContentAlignment="Center" AutomationProperties.Name="唤醒词"/><StackPanel Name="WakePhraseActions" Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="8,0,0,0"><Button Name="SaveWakePhraseButton" Content="保存" Padding="10,4" AutomationProperties.Name="保存唤醒词"/><Button Name="ResetWakePhraseButton" Content="恢复默认" Padding="9,4" Margin="6,0,0,0" AutomationProperties.Name="恢复默认唤醒词"/></StackPanel></Grid>
+              <TextBlock Name="WakeHintLabel" Text="2—16 个汉字，建议 4—6 字；听到‘在’后开始说话。" Style="{StaticResource Note}" Margin="0,0,0,7"/><Border Style="{StaticResource Divider}"/>
+              <CheckBox Name="BargeInToggle" Content="朗读时也可唤醒" MinHeight="33"/><TextBlock Name="EchoStatusLabel" Text="" Style="{StaticResource Note}" Margin="0,0,0,6"/><Border Style="{StaticResource Divider}"/>
+              <CheckBox Name="AutoSendToggle" Content="手动录音停顿后自动发送" MinHeight="33"/>
+            </StackPanel></Border>
+          </StackPanel>
+        </ScrollViewer>
+        <ScrollViewer Name="AppearancePage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,3,0">
+          <StackPanel><TextBlock Text="悬浮声波" Style="{StaticResource SectionLabel}"/>
+            <Border Style="{StaticResource SettingsGroup}"><StackPanel>
+              <Grid Margin="0,9"><Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="样式" VerticalAlignment="Center"/><ComboBox Name="StyleCombo" Grid.Column="1" AutomationProperties.Name="声波样式"/></Grid><Border Style="{StaticResource Divider}"/>
+              <Grid Margin="0,14"><Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="大小" VerticalAlignment="Center"/><Slider Name="SizeSlider" Grid.Column="1" Minimum="180" Maximum="360" Value="260" TickFrequency="10" IsSnapToTickEnabled="True" VerticalAlignment="Center" AutomationProperties.Name="悬浮声波大小"/><TextBlock Name="SizeValueLabel" Grid.Column="2" Text="260" Width="34" FontSize="12" Foreground="#737378" TextAlignment="Right" VerticalAlignment="Center"/></Grid><Border Style="{StaticResource Divider}"/>
+              <CheckBox Name="PinToggle" Content="始终置顶" IsChecked="True"/><Border Style="{StaticResource Divider}"/><CheckBox Name="CaptionToggle" Content="显示字幕"/>
+            </StackPanel></Border>
+            <Button Name="ResetPositionButton" Content="重置悬浮位置" HorizontalAlignment="Right" Margin="0,14,0,0"/>
+          </StackPanel>
+        </ScrollViewer>
+      </Grid>
+    </DockPanel>
+  </Grid>
+</Window>

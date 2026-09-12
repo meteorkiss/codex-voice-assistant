@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "observedDate": "2026-09-10",
+  "scope": "Windows x64 local development runtime; excludes optional voice-design experiments",
+  "provenance": "Sources copied from existing local manifests; artifact hashes rechecked locally. This is not a verified download lock or redistribution authorization.",
+  "python": {
+    "version": "3.11.15",
+    "architecture": "AMD64",
+    "buildMarker": "20260610",
+    "archiveSource": null,
+    "archiveSha256": null,
+    "note": "Original interpreter archive provenance remains unverified; do not treat python.exe alone as a complete runtime."
+  },
+  "pythonPackages": {
+    "aiohappyeyeballs": "2.7.1",
+    "aiohttp": "3.14.3",
+    "aiosignal": "1.4.0",
+    "attrs": "26.1.0",
+    "certifi": "2026.7.22",
+    "edge-tts": "7.2.7",
+    "frozenlist": "1.8.0",
+    "idna": "3.19",
+    "multidict": "6.7.1",
+    "numpy": "2.4.6",
+    "propcache": "0.5.2",
+    "pypinyin": "0.55.0",
+    "sherpa-onnx": "1.13.7",
+    "sherpa-onnx-core": "1.13.7",
+    "tabulate": "0.10.0",
+    "typing-extensions": "4.16.0",
+    "yarl": "1.24.5"
+  },
+  "artifacts": [
+    {
+      "path": "runtime/models/sensevoice/model.int8.onnx",
+      "bytes": 239233841,
+      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
+    },
+    {
+      "path": "runtime/models/sensevoice/tokens.txt",
+      "bytes": 315894,
+      "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
+    },
+    {
+      "path": "runtime/models/sensevoice/silero_vad.onnx",
+      "bytes": 643854,
+      "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+    },
+    {
+      "path": "runtime/models/wake/configuration.json",
+      "bytes": 48,
+      "sha256": "63cd5920dc448cf6416aa533e4de43f3066f646ddfca8ed19e05b1b265f37cb6",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
+    },
+    {
+      "path": "runtime/models/wake/decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "bytes": 181069,
+      "sha256": "ed83454004d5bd16d831eaf00adcd181ed7734886aab6ef440f3ffa5aa3cfe3b",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
+    },
+    {
+      "path": "runtime/models/wake/empty-keywords.txt",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recordedSource": "local-generated-empty-file"
+    },
+    {
+      "path": "runtime/models/wake/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "bytes": 4777666,
+      "sha256": "dd784973fc9d2fabb3b800d6dcd20fc3b0ca84f8e2415afe54b032878e447f4d",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
+    },
+    {
+      "path": "runtime/models/wake/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "bytes": 65242,
+      "sha256": "f79760052b87239e325f0567c752ad3130b30d92effb847d4307743c20c59a24",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
+    },
+    {
+      "path": "runtime/models/wake/README.md",
+      "bytes": 767,
+      "sha256": "dd0ec68b5d9ee736f016fc982078bd3cdbccc69057e9910bdd45580992d13367",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
+    },
+    {
+      "path": "runtime/models/wake/tokens.txt",
+      "bytes": 1627,
+      "sha256": "72316508d9119696145abc6f1f8cdc46287535c34e5ce7e595f845cb1499cf2e",
+      "recordedSource": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
+    },
+    {
+      "path": "runtime/audio/NAudio.Core.dll",
+      "bytes": 187904,
+      "sha256": "fcf493fc47a2f478a65303886b975fbdbf714cbb1f2d79f7fce97e4bb16b01a8",
+      "recordedSource": "https://api.nuget.org/v3-flatcontainer/naudio.core/2.2.1/naudio.core.2.2.1.nupkg",
+      "packageVersion": "2.2.1",
+      "packageMember": "lib/netstandard2.0/NAudio.Core.dll"
+    },
+    {
+      "path": "runtime/audio/NAudio.Wasapi.dll",
+      "bytes": 179200,
+      "sha256": "618ef0e49d64e7a66dfe64bbf6ae81705b9d9683d8a9f321e5c3024d666bdf82",
+      "recordedSource": "https://api.nuget.org/v3-flatcontainer/naudio.wasapi/2.2.1/naudio.wasapi.2.2.1.nupkg",
+      "packageVersion": "2.2.1",
+      "packageMember": "lib/netstandard2.0/NAudio.Wasapi.dll"
+    }
+  ]
+}

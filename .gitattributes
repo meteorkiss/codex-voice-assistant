@@ -1,0 +1,13 @@
+* text=auto
+*.ps1 text eol=lf
+*.py text eol=lf
+*.cs text eol=lf
+*.xaml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+VERSION text eol=lf
+*.wav binary
+*.mp3 binary
+*.ico binary
+*.png binary

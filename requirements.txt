@@ -1,0 +1,4 @@
+edge-tts==7.2.7
+sherpa-onnx==1.13.7
+numpy==2.4.6
+pypinyin==0.55.0
