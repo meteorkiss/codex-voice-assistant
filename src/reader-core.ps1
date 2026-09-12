@@ -185,7 +185,28 @@ function New-TranscriptTail([string]$Path) {
     return $tail
 }
 
+function Find-RelocatedTranscript([string]$Path) {
+    # Codex archives/restores by moving the same rollout. Only accept the
+    # exact filename under the same Codex root, never another task or a scan.
+    $full=[IO.Path]::GetFullPath($Path)
+    $match=[regex]::Match($full,'\A(?<root>.+)[\\/](?:sessions[\\/]\d{4}[\\/]\d{2}[\\/]\d{2}|archived_sessions)[\\/](?<name>rollout-(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})T[^\\/]+-[0-9a-fA-F-]{36}\.jsonl)\z')
+    if (-not $match.Success) { return '' }
+    $root=$match.Groups['root'].Value
+    $name=$match.Groups['name'].Value
+    $active=Join-Path $root ('sessions\'+$match.Groups['year'].Value+'\'+$match.Groups['month'].Value+'\'+$match.Groups['day'].Value+'\'+$name)
+    $archived=Join-Path $root ('archived_sessions\'+$name)
+    foreach ($candidate in @($active,$archived)) {
+        if ($candidate -ine $full -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+    }
+    return ''
+}
+
 function Read-NewCompletedAnswers($Tail) {
+    if (-not (Test-Path -LiteralPath $Tail.Path -PathType Leaf)) {
+        $relocated=Find-RelocatedTranscript $Tail.Path
+        # Preserve offset, partial bytes and turn deduplication across a move.
+        if ($relocated) { $Tail.Path=$relocated }
+    }
     $file = Get-Item -LiteralPath $Tail.Path -ErrorAction Stop
     if ($file.Length -lt $Tail.Offset -or $file.CreationTimeUtc.Ticks -ne $Tail.CreationTicks) {
         # Replaced history is treated like reopening the reader: don't replay it.

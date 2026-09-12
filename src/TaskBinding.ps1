@@ -38,7 +38,7 @@ function Invoke-TaskBindingCommit {
     if ($blocked) { throw $blocked }
     if (-not (Test-TaskBindingResult $Result $TargetThreadId)) { throw '目标任务回执不完整，保留原任务。' }
     $before=@{}
-    foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion')) {
+    foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion','bindingReadError')) {
         $before[$key]=Get-Variable -Name $key -Scope Script -ValueOnly -ErrorAction SilentlyContinue
     }
     $before.TaskText=$TaskLabel.Text; $before.TaskTip=$TaskLabel.ToolTip
@@ -51,7 +51,7 @@ function Invoke-TaskBindingCommit {
     } catch {
         # Persisting either settings or the caller's connection receipt can fail.
         # Restore the former destination before returning that failure.
-        foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion')) {
+        foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion','bindingReadError')) {
             Set-Variable -Name $key -Scope Script -Value $before[$key]
         }
         $TaskLabel.Text=$before.TaskText; $TaskLabel.ToolTip=$before.TaskTip

@@ -164,6 +164,36 @@ Case 'Unique command through real completion/read/apply routes the next ordinary
     Complete-Job @{ok=$true;accepted=$true;threadId=$request.threadId;requestId=$request.requestId}
     Assert ($script:sent -eq 1 -and $InputBox.Text -eq '' -and -not $InputBox.IsReadOnly) 'Actual normal receipt completion regressed.'
 }
+Case 'Reported dotted-version wording is consumed locally and binds only after validation' {
+    foreach($entry in @(
+        @('帮我切换刀声伴V0.6.17 任务','声伴V0.6.17'),
+        @('声伴，请你帮我切换到声伴 v0.6.17 任务吧，谢谢。','声伴 v0.6.17'),
+        @('帮我切换到声伴 V 0 . 6 . 17','声伴 V 0 . 6 . 17')
+    )) {
+        Reset-Case
+        $originalAsr=$entry[0];$query=$entry[1]
+        $InputBox.Text=$originalAsr;Send-Text
+        Assert ($script:bridgeJob.Purpose -eq 'voice-find' -and $script:bridgeJob.Request.query -ceq $query) 'Version wording was sent as chat or the title was rewritten.'
+        Assert ($originalAsr -ceq $entry[0] -and $InputBox.Text -ceq '' -and $script:localCommandCount -eq 1) 'Original ASR or consumed-command accounting changed.'
+        Assert-Source;Assert-NoSend
+        Complete-Job (Search-Result 'unique' @((Candidate $targetId '声伴 v0.6.17 · 短时连续接话')) $query)
+        Assert ($script:bridgeJob.Purpose -eq 'voice-bind' -and $script:bridgeJob.Request.threadId -eq $targetId) 'Version lookup skipped target validation.'
+        Assert-Source;Assert-NoSend
+        $result=Bind-Result;$result.title='声伴 v0.6.17 · 短时连续接话'
+        Complete-Job $result
+        Assert ($script:threadId -eq $targetId -and $TaskLabel.Text -ceq $result.title -and $script:queued.Count -eq 1) 'Version target did not bind once with its original title.'
+        Assert-NoSend
+    }
+}
+Case 'A shared version prefix requires a numbered choice and preserves the original binding' {
+    $InputBox.Text='帮我切换刀声伴V0.6.17任务';Send-Text
+    Complete-Job (Search-Result 'ambiguous' @((Candidate $targetId '声伴 v0.6.17 · 短时连续接话'),(Candidate $thirdId '声伴 v0.6.17 · 验收')) '声伴V0.6.17')
+    Assert ((Test-VoiceTaskSelectionPending) -and $null -eq $script:bridgeJob -and $TaskCombo.SelectedIndex -eq -1) 'Ambiguous version prefix guessed a destination.'
+    Assert-Source;Assert-NoSend
+    $InputBox.Text='取消切换';Send-Text
+    Assert ($null -eq $script:voiceTaskSwitch -and $InputBox.Text -ceq '') 'Version candidate cancellation was not consumed locally.'
+    Assert-Source;Assert-NoSend
+}
 Case 'Two candidates accept a spoken second selection and validate that target' {
     Start-Choice;Assert-Source;Assert-NoSend
     $script:voiceGeneration++;$InputBox.Text='选择第二个';Send-Text

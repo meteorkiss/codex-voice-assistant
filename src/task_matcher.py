@@ -7,6 +7,7 @@ word dropping, title-summary search, or task switching is performed here.
 from __future__ import annotations
 
 import unicodedata
+import re
 
 MAX_QUERY_LENGTH = 200
 MAX_CANDIDATES = 5
@@ -26,7 +27,8 @@ def normalize_title(value):
     Keep +/# and dots between digits: C++/C# and V2.1/V21 are different titles.
     No command phrases, fillers, or common words are removed.
     """
-    folded = unicodedata.normalize('NFKC', value).casefold()
+    folded = ''.join(char for char in unicodedata.normalize('NFKC', value).casefold()
+                     if not char.isspace())
     return ''.join(char for index, char in enumerate(folded)
                    if unicodedata.category(char)[0] in 'LN' or char in '+#' or
                    (char == '.' and 0 < index < len(folded) - 1 and
@@ -90,6 +92,13 @@ def match_tasks(query, threads):
     query, normalized = validate_query(query)
     titled = [(thread, normalize_title(thread['title'])) for thread in threads
               if isinstance(thread, dict) and isinstance(thread.get('title'), str)]
+    # A spoken V0.6.17 must not bind V0.6.170 / V0.6.17.1 via substring or
+    # phonetic matching. Spacing was removed above without dropping digit dots.
+    versions = re.findall(r'v[0-9]+(?:\.[0-9]+)*', normalized)
+    if versions:
+        titled = [(thread, title) for thread, title in titled
+                  if all(version in re.findall(r'v[0-9]+(?:\.[0-9]+)*', title)
+                         for version in versions)]
     matches = [thread for thread, title in titled if title == normalized]
     method = 'exact'
     if not matches:

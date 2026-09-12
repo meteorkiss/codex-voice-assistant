@@ -60,6 +60,32 @@ class TitleMatchingTests(unittest.TestCase):
             with self.subTest(query=query, title=title):
                 self.assertEqual(matcher.match_tasks(query, [task(title)])['matchType'], 'none')
 
+    def test_spoken_version_spacing_preserves_query_and_original_display_title(self):
+        expected = task('声伴 v0.6.17 · 短时连续接话')
+        for query in ('声伴V0.6.17', '声伴 V 0 . 6 . 17', '声伴 ｖ０．６．１７'):
+            with self.subTest(query=query):
+                out = matcher.match_tasks(query, [task('声伴 v0.6.16 · 已完成'), expected])
+                self.assertEqual((out['matchType'], out['matchMethod']), ('unique', 'contains'))
+                self.assertEqual(out['query'], query)
+                self.assertEqual(out['threads'], [expected])
+                self.assertEqual(out['threads'][0]['title'], '声伴 v0.6.17 · 短时连续接话')
+
+    def test_explicit_versions_never_match_a_longer_version_prefix(self):
+        for query, title in (
+                ('声伴V0.6.17', '声伴 v0.6.170 · 其它版本'),
+                ('声伴 V 0 . 6 . 17', '声伴 v0.6.17.1 · 补丁'),
+                ('声伴V0.6.17', '声伴 v06.17 · 其它版本'),
+                ('高斯坡建V2', '高斯破渐V20实验'),
+                ('高斯坡建V0.6.17', '高斯破渐V0.6.170实验')):
+            with self.subTest(query=query, title=title):
+                self.assertEqual(matcher.match_tasks(query, [task(title)])['matchType'], 'none')
+
+    def test_same_version_candidates_remain_ambiguous(self):
+        rows = [task('声伴 v0.6.17 · 短时连续接话'), task('声伴 V0.6.17 · 验收')]
+        out = matcher.match_tasks('声伴V0.6.17', rows)
+        self.assertEqual((out['matchType'], out['totalMatches']), ('ambiguous', 2))
+        self.assertEqual(out['threads'], rows)
+
     def test_syllables_do_not_merge_across_character_boundaries(self):
         self.assertEqual(matcher.match_tasks('西安设', [task('先设计工具')])['matchType'], 'none')
 

@@ -167,7 +167,7 @@ $script:TestMode=$true; $script:PreviewPath=$null
 $assistantAst=Read-ProductionAst (Join-Path $SourceRoot 'Assistant.ps1')
 $handsFreePath=Join-Path $SourceRoot 'HandsFree.ps1'
 [void](Read-ProductionAst $handsFreePath)
-foreach ($name in @('Stop-Output','Test-FullDuplexReady','Safe-To-Play','Begin-Recording','Cancel-Recording','End-Recording','Send-Text','Apply-Thread')) {
+foreach ($name in @('Stop-Output','Test-FullDuplexReady','Safe-To-Play','Begin-Recording','Cancel-Recording','End-Recording','Send-Text','Apply-Thread','Read-BoundTaskAnswers')) {
     $definition=$assistantAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
     if (-not $definition) { throw "Production function missing: $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -179,6 +179,9 @@ foreach ($name in @('Stop-Output','Test-FullDuplexReady','Safe-To-Play','Begin-R
 . (Join-Path $SourceRoot 'TaskSwitch.ps1')
 . (Join-Path $SourceRoot 'TaskCreate.ps1')
 . (Join-Path $SourceRoot 'LocalCommands.ps1')
+$ledgerAst=Read-ProductionAst (Join-Path $SourceRoot 'PendingSends.ps1')
+$receiptDefinition=$ledgerAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-SendReceiptState'},$true)
+. ([scriptblock]::Create($receiptDefinition.Extent.Text))
 function Remove-OwnedFiles($Paths) { foreach ($path in @($Paths)) { if ($path) { $script:removed += $path } } }
 function Close-Job($Job,[switch]$Kill) { $script:killed += $Job }
 function Save-Settings {}
@@ -186,7 +189,23 @@ function Sync-DesktopPreferences {}
 function Update-DesktopDisplay {}
 function Reconcile-PendingSends {}
 function Sync-PendingSend {}
-function Start-Bridge($Request,[string]$Purpose) { $script:bridgeRequests += $Request; return $true }
+function Clear-PendingSend([string]$TargetThreadId) { $script:clearedSends += $TargetThreadId }
+function Start-Bridge($Request,[string]$Purpose) {
+    $script:bridgeRequests += $Request
+    if ($script:holdBridge) {
+        $path=Join-Path $fixtureRoot ([Guid]::NewGuid().ToString('N')+'.bridge-result.json')
+        $script:fixtureFiles.Add($path)
+        $script:bridgeJob=@{Purpose=$Purpose;Request=$Request;Output=$path;Files=@($path);Process=[pscustomobject]@{HasExited=$false;ExitCode=0}}
+    }
+    return $true
+}
+function Complete-FakeSend([bool]$Accepted=$true) {
+    $job=$script:bridgeJob
+    $receipt=if ($Accepted) { @{ok=$true;accepted=$true;threadId=$job.Request.threadId;requestId=$job.Request.requestId} }
+        else { @{ok=$false;error=@{uncertain=$false;message='Test rejection'}} }
+    $receipt | ConvertTo-Json | Set-Content -LiteralPath $job.Output -Encoding UTF8
+    $job.Process.HasExited=$true
+}
 function Read-NewCompletedAnswers($Tail) { $items=$script:pendingAnswers; $script:pendingAnswers=@(); return $items }
 function New-TranscriptTail([string]$Path) { return @{UserTurnVersion=0;Latest='Previous answer'} }
 function Begin-Speech([string]$Text) {
@@ -199,7 +218,7 @@ function Begin-Transcription([string]$WavePath,[bool]$SendAfter) {
     $path=Join-Path $fixtureRoot ([Guid]::NewGuid().ToString('N')+'.asr.json')
     @{ok=$script:asrSucceeds;text=$script:nextTranscript} | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding UTF8
     $script:fixtureFiles.Add($path)
-    $script:asrJob=@{Process=[pscustomobject]@{HasExited=$true;ExitCode=$(if($script:asrSucceeds){0}else{1})};Output=$path;Files=@($path,$WavePath);Generation=$script:voiceGeneration;ThreadId=$script:threadId;SendAfter=$SendAfter;Prefix=$script:recordPrefix;FromWake=$script:handsFreeCapture;FromFollowUp=$script:followUpCapture}
+    $script:asrJob=@{Process=[pscustomobject]@{HasExited=$true;ExitCode=$(if($script:asrSucceeds){0}else{1})};Output=$path;Files=@($path,$WavePath);Generation=$script:voiceGeneration;ThreadId=$script:threadId;SendAfter=$SendAfter;Prefix=$script:recordPrefix;FromWake=$script:handsFreeCapture;FromFollowUp=$script:followUpCapture;FollowUpGeneration=$script:shortFollowUpGeneration}
     $script:recMode='transcribing'
     Add-Trace 'asr:started'
 }
@@ -213,6 +232,8 @@ $script:handsFreeItem=$null
 foreach ($control in @('SpeakButton','SendButton','StopButton')) {
     (Get-Variable -Name $control -ValueOnly).Add_Click((Get-ProductionHandler $assistantAst $control 'Add_Click'))
 }
+$desktopAst=Read-ProductionAst (Join-Path $SourceRoot 'DesktopController.ps1')
+$InputBox.Add_TextChanged((Get-ProductionHandler $desktopAst 'InputBox' 'Add_TextChanged'))
 $tick=Get-ProductionHandler $assistantAst 'timer' 'Add_Tick'
 function Click([string]$Name) {
     (Get-Variable -Name $Name -ValueOnly).RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Button]::ClickEvent)))
@@ -221,6 +242,7 @@ function Reset-Case {
     . $handsFreePath
     Initialize-TestDoubles
     $script:connected=$true; $script:threadId='11111111-1111-4111-8111-111111111111'
+    $script:bindingReadError=''; $script:holdBridge=$false; $script:clearedSends=@()
     $script:recMode='idle'; $script:armDue=[DateTime]::MaxValue
     $script:manualRecorder=$null; $script:echoQuestionCapture=$false; $script:bargeInEnabled=$false
     $script:ttsJob=$null; $script:asrJob=$null; $script:bridgeJob=$null
@@ -282,10 +304,16 @@ function Finish-QuestionAfterSpeech {
     $script:recorder.Release()
     Tick-And-AssertHealthy
 }
+function Start-FakeFollowUpWait {
+    Start-ShortFollowUpWait 'wake' $script:shortFollowUpGeneration $script:threadId $script:tail.UserTurnVersion
+}
+function Register-FakeFollowUpAnswer {
+    Register-ShortFollowUpAnswer ([pscustomobject]@{UserTurnVersion=($script:tail.UserTurnVersion+1)})
+}
 function Open-ShortFollowUpCapture {
     $script:shortFollowUpEnabled=$true
-    Start-ShortFollowUpWait 'wake'
-    Register-ShortFollowUpAnswer
+    Start-FakeFollowUpWait
+    Register-FakeFollowUpAnswer
     Assert-That ($script:shortFollowUp.Phase -eq 'waiting-playback') 'Eligible wake turn did not wait for answer playback.'
     $script:spoken++
     $script:lastSpeechEpoch=$script:epoch
@@ -384,19 +412,19 @@ try {
     # Optional short follow-up is off by default and begins only after natural
     # playback completion of an explicitly woken turn.
     Reset-Case; Start-WakeCase
-    Start-ShortFollowUpWait 'wake'
+    Start-FakeFollowUpWait
     Assert-That (-not $script:shortFollowUp) 'Default-off follow-up unexpectedly armed a microphone window.'
 
-    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-ShortFollowUpWait 'wake'; Register-ShortFollowUpAnswer
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-FakeFollowUpWait; Register-FakeFollowUpAnswer
     $script:spoken++; $script:lastSpeechEpoch=$script:epoch; [CodexReader.AudioPlayer]::State='closed'
     Update-ShortFollowUp ([DateTime]::UtcNow)
     Assert-That ($script:shortFollowUp.Phase -eq 'preparing' -and $script:recMode -eq 'arming') 'An answer that finished between polls did not open the follow-up handoff.'
 
-    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-ShortFollowUpWait 'wake'; Register-ShortFollowUpAnswer
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-FakeFollowUpWait; Register-FakeFollowUpAnswer
     [CodexReader.AudioPlayer]::State='closed'; Update-ShortFollowUp ([DateTime]::UtcNow)
     Assert-That (-not $script:shortFollowUp -and $script:recMode -eq 'idle') 'Failed answer speech left a dormant follow-up window armed.'
 
-    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-ShortFollowUpWait 'wake'; Register-ShortFollowUpAnswer
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-FakeFollowUpWait; Register-FakeFollowUpAnswer
     $script:spoken++; $script:lastSpeechEpoch=$script:epoch; [CodexReader.AudioPlayer]::State='playing'; Update-ShortFollowUp ([DateTime]::UtcNow)
     Stop-Output; Update-ShortFollowUp ([DateTime]::UtcNow)
     Assert-That (-not $script:shortFollowUp -and $script:recMode -eq 'idle') 'Explicitly interrupted answer playback opened a follow-up window.'
@@ -406,10 +434,25 @@ try {
     Tick-And-AssertHealthy
     Assert-That (-not $script:shortFollowUp -and -not $script:followUpCapture -and $script:recMode -eq 'idle' -and $script:recorder.Cancels -eq 1) 'Idle follow-up timeout did not cancel exactly its own capture.'
 
+    # Advance the policy clock past the original six-second deadline. Previously
+    # tests only changed recorder timestamps and never expired session.Deadline.
+    Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+    $captureStarted=$script:recorder.StartedUtc
+    $script:recorder.LastVoiceUtc=$captureStarted.AddSeconds(5.8)
+    Update-ShortFollowUp ($captureStarted.AddSeconds(6.1))
+    Assert-That ($script:recMode -eq 'listening' -and $script:followUpCapture -and $script:recorder.Cancels -eq 0) 'Speech begun near six seconds was cancelled by the idle deadline.'
+    $script:recorder.LastVoiceUtc=$captureStarted.AddSeconds(29)
+    Update-ShortFollowUp ($captureStarted.AddSeconds(29.5))
+    Assert-That ($script:recMode -eq 'listening' -and $script:shortFollowUp.Phase -eq 'listening') 'An ongoing follow-up sentence did not survive until its recording limit.'
+    Update-ShortFollowUp ($captureStarted.AddSeconds(30.1))
+    Assert-That ($script:recMode -eq 'stopping' -and $script:recorder.StoppedPath -and $script:recorder.Cancels -eq 0 -and -not $script:submitAfterRecognition) 'The thirty-second deadline discarded speech or prepared an automatic send instead of preserving a draft.'
+
     Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
     $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-31); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow
     Tick-And-AssertHealthy
-    Assert-That ($script:recMode -eq 'stopping' -and $script:shortFollowUp.Phase -eq 'recognizing') 'Thirty-second follow-up limit did not preserve the sentence for transcription.'
+    Assert-That ($script:recMode -eq 'stopping' -and $script:shortFollowUp.Phase -eq 'recognizing' -and -not $script:submitAfterRecognition) 'Thirty-second follow-up limit did not preserve the sentence as an unsent draft.'
+    $script:recorder.Release(); $script:TestMode=$false; Tick-And-AssertHealthy
+    Assert-That ($InputBox.Text -eq 'Recognized question' -and -not $script:shortFollowUp -and $script:bridgeRequests.Count -eq 0) 'A maximum-length sentence was automatically sent after its ASR completed.'
 
     Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
     $script:nextTranscript='嗯'; $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-5); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow.AddSeconds(-2.2)
@@ -421,13 +464,76 @@ try {
     Tick-And-AssertHealthy; $script:recorder.Release(); $script:TestMode=$false; Tick-And-AssertHealthy
     Assert-That ($script:bridgeRequests.Count -eq 1 -and $script:bridgeRequests[0].threadId -eq $script:threadId -and $script:bridgeRequests[0].text -eq '请继续解释第二种方法') 'Clear follow-up did not dispatch once to its captured task.'
 
-    foreach($ending in @('draft','target','external','user')) {
+    # Closing after capture but before its completion invalidates the separate
+    # follow-up token even if the ordinary recording generation has not changed.
+    Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+    End-Recording $true; $script:recorder.Release(); Begin-Transcription $script:recordPath $true
+    $oldVoiceGeneration=$script:voiceGeneration
+    Close-ShortFollowUp
+    $InputBox.Text='用户的新草稿'; $script:TestMode=$false
+    Tick-And-AssertHealthy
+    Assert-That ($script:voiceGeneration -eq $oldVoiceGeneration -and $InputBox.Text -eq '用户的新草稿' -and $script:bridgeRequests.Count -eq 0 -and -not $script:shortFollowUp) 'A stale follow-up ASR result overwrote or dispatched after its window closed.'
+
+    Reset-Case; Start-WakeCase; Activate-And-ReleaseWake; Finish-AckAndStartQuestion
+    End-Recording $true; $script:recorder.Release(); Begin-Transcription $script:recordPath $true
+    Close-ShortFollowUp; $InputBox.Text='关闭后的新草稿'; $script:TestMode=$false
+    Tick-And-AssertHealthy
+    Assert-That ($InputBox.Text -eq '关闭后的新草稿' -and $script:bridgeRequests.Count -eq 0) 'A late original wake ASR bypassed the revoked follow-up token.'
+
+    Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+    End-Recording $true; $script:recorder.Release()
+    $script:bridgeJob=@{Purpose='list';Process=[pscustomobject]@{HasExited=$false}}
+    Tick-And-AssertHealthy
+    $oldIntent=$script:autoDispatch
+    Assert-That ($oldIntent -and $oldIntent.VoiceSource -eq 'follow-up') 'The bridge-busy scenario did not preserve an undispatched follow-up.'
+    Stop-ShortFollowUpByUser
+    Assert-That (-not $script:autoDispatch -and $InputBox.Text -eq 'Recognized question') 'Explicit close did not revoke the waiting intent while preserving its draft.'
+    $script:bridgeJob=$null; $script:autoDispatch=$oldIntent; $script:TestMode=$false
+    Try-AutoDispatch
+    Assert-That (-not $script:autoDispatch -and $script:bridgeRequests.Count -eq 0) 'Reintroduced stale follow-up intent was dispatched after close.'
+
+    # Real send/receipt handlers run against a held, in-memory bridge. Revoking
+    # follow-up must not erase the receipt ledger or permit a late rearm.
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true
+    $script:holdBridge=$true; $script:TestMode=$false; $InputBox.Text='请解释这段内容'
+    Send-Text 'wake'
+    Assert-That ($null -ne $script:bridgeJob.FollowUpGeneration) 'Voice send did not snapshot its cancellation token.'
+    Stop-ShortFollowUpByUser; $InputBox.Text='新的未发送草稿'
+    Complete-FakeSend; Tick-And-AssertHealthy
+    Assert-That ($script:clearedSends.Count -eq 1 -and $script:sent -eq 1 -and -not $script:shortFollowUp -and $InputBox.Text -eq '新的未发送草稿') 'A late accepted send either reopened follow-up, lost its ledger settlement, or cleared a newer draft.'
+
+    foreach($accepted in @($true,$false)) {
+        Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true
+        $script:holdBridge=$true; $script:TestMode=$false; $InputBox.Text='之前的问题'
+        Send-Text 'wake'; Close-ShortFollowUp; $InputBox.Text=''
+        Start-FakeFollowUpWait; $newSession=$script:shortFollowUp
+        Complete-FakeSend $accepted; Tick-And-AssertHealthy
+        Assert-That ([object]::ReferenceEquals($script:shortFollowUp,$newSession)) 'An old send receipt replaced or closed a newer follow-up exchange.'
+    }
+
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true
+    $script:holdBridge=$true; $script:TestMode=$false; $InputBox.Text='当前问题'
+    Send-Text 'wake'; Complete-FakeSend; Tick-And-AssertHealthy
+    Assert-That ($script:shortFollowUp.Phase -eq 'waiting-answer') 'A current accepted voice send did not arm its answer wait.'
+    Register-ShortFollowUpAnswer ([pscustomobject]@{UserTurnVersion=0})
+    Assert-That ($script:shortFollowUp.Phase -eq 'waiting-answer') 'A previous answer was assigned to the new voice send.'
+    Register-ShortFollowUpAnswer ([pscustomobject]@{UserTurnVersion=1})
+    Assert-That ($script:shortFollowUp.Phase -eq 'waiting-playback') 'The matching answer could not enter playback wait.'
+    Stop-ShortFollowUpByUser; Register-ShortFollowUpAnswer ([pscustomobject]@{UserTurnVersion=1})
+    Assert-That (-not $script:shortFollowUp) 'A late answer recreated a closed follow-up exchange.'
+
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-FakeFollowUpWait
+    Stop-Output '已停止朗读。'; Register-FakeFollowUpAnswer
+    Assert-That (-not $script:shortFollowUp -and $script:recMode -eq 'idle') 'Explicit tray stop while waiting for an answer allowed a later follow-up window.'
+
+    foreach($ending in @('draft','target','external','user','connection')) {
         Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
         switch($ending) {
             'draft' {$InputBox.Text='用户开始编辑';Update-ShortFollowUp ([DateTime]::UtcNow)}
             'target' {$script:threadId='22222222-2222-4222-8222-222222222222';Update-ShortFollowUp ([DateTime]::UtcNow)}
             'external' {$script:externalCapture=$true;Set-FakeCaptureSnapshot;Update-ShortFollowUp ([DateTime]::UtcNow)}
             'user' {Stop-ShortFollowUpByUser}
+            'connection' {$script:bindingReadError='Missing transcript';Update-ShortFollowUp ([DateTime]::UtcNow)}
         }
         Assert-That (-not $script:shortFollowUp -and -not $script:followUpCapture -and $script:recMode -eq 'idle') ('Follow-up ending did not close safely: '+$ending)
     }

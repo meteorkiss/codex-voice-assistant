@@ -38,23 +38,38 @@ function Close-ShortFollowUp([string]$Message='', [switch]$CancelCapture) {
     $script:shortFollowUp=$null
     $script:followUpCapture=$false
     $script:shortFollowUpGeneration++
+    if ($script:autoDispatch -and $script:autoDispatch.VoiceSource -in @('wake','follow-up')) { $script:autoDispatch=$null }
     if ($CancelCapture -and $owned -and $script:recMode -ne 'idle') { Cancel-Recording }
     if ($Message -and ($active -or $owned)) { $script:notice=$Message }
 }
 
-function Start-ShortFollowUpWait([string]$Source) {
+function Test-ShortFollowUpGeneration($Generation, [string]$ThreadId) {
+    return ($null -ne $Generation -and [long]$Generation -eq $script:shortFollowUpGeneration -and
+        $ThreadId -ceq [string]$script:threadId -and -not $script:closing)
+}
+
+function Start-ShortFollowUpWait([string]$Source, $Generation, [string]$ThreadId, [int]$UserTurnBaseline = -1) {
+    # A send may finish after the user ended this exchange. Its receipt still
+    # belongs in the send ledger, but cannot arm (or close) a newer exchange.
+    if (-not (Test-ShortFollowUpGeneration $Generation $ThreadId)) { return }
     if ($Source -notin @('wake','follow-up') -or -not $script:shortFollowUpEnabled -or -not $script:handsFreeEnabled) {
         Close-ShortFollowUp
         return
     }
+    if (-not $script:connected -or $script:bindingReadError -or $script:pendingUncertain -or $UserTurnBaseline -lt 0) { return }
     $script:shortFollowUpGeneration++
     $script:shortFollowUp=@{Generation=$script:shortFollowUpGeneration;Phase='waiting-answer';ThreadId=[string]$script:threadId;
-        StartedUtc=[DateTime]::UtcNow;Deadline=[DateTime]::UtcNow.AddMinutes(5);SpokenBaseline=$script:spoken;PlaybackEpoch=-1}
+        StartedUtc=[DateTime]::UtcNow;Deadline=[DateTime]::UtcNow.AddMinutes(5);SpokenBaseline=$script:spoken;PlaybackEpoch=-1;
+        UserTurnBaseline=$UserTurnBaseline}
 }
 
-function Register-ShortFollowUpAnswer {
+function Register-ShortFollowUpAnswer($Answer) {
     $session=$script:shortFollowUp
-    if (-not $session -or $session.Phase -ne 'waiting-answer' -or $session.ThreadId -cne [string]$script:threadId) { return }
+    if (-not $session -or $session.Phase -ne 'waiting-answer' -or
+        -not (Test-ShortFollowUpGeneration $session.Generation $session.ThreadId) -or
+        -not $Answer -or $null -eq $Answer.UserTurnVersion) { return }
+    if ($Answer.UserTurnVersion -le $session.UserTurnBaseline) { return }
+    if ($Answer.UserTurnVersion -ne ($session.UserTurnBaseline+1)) { Close-ShortFollowUp; return }
     if (-not $script:autoRead) { Close-ShortFollowUp; return }
     $session.Phase='waiting-playback'
     $session.SpokenBaseline=$script:spoken
@@ -89,7 +104,7 @@ function Update-ShortFollowUp([DateTime]$Now = [DateTime]::UtcNow) {
     $session=$script:shortFollowUp
     if (-not $session) { return }
     if ($script:closing -or -not $script:shortFollowUpEnabled -or -not $script:handsFreeEnabled -or
-        -not $script:connected -or $session.ThreadId -cne [string]$script:threadId -or $script:pendingUncertain) {
+        -not $script:connected -or $script:bindingReadError -or $session.ThreadId -cne [string]$script:threadId -or $script:pendingUncertain) {
         Close-ShortFollowUp '连续接话已结束。' -CancelCapture
         return
     }
@@ -100,6 +115,26 @@ function Update-ShortFollowUp([DateTime]$Now = [DateTime]::UtcNow) {
     if ($InputBox.Text.Trim() -and $session.Phase -notin @('dispatching','recognizing')) {
         Close-ShortFollowUp '草稿已保留，连续接话已结束。' -CancelCapture
         return
+    }
+    # The six-second deadline is only for starting a sentence. Observe capture
+    # progress before applying it, including the first tick after microphone handoff.
+    if ($session.Phase -eq 'preparing' -and $script:recMode -eq 'listening') {
+        $session.Phase='listening'
+        $session.Deadline=$script:recorder.StartedUtc.AddSeconds($script:shortFollowUpWaitSeconds)
+        $script:notice='连续接话 · 正在听；不想继续可点“结束接话”。'
+    }
+    if ($session.Phase -eq 'listening') {
+        if ($script:recMode -in @('stopping','transcribing')) {
+            $session.Phase='recognizing'
+            $session.Deadline=$Now.AddMinutes(1)
+        } elseif ($script:recMode -eq 'listening' -and $script:recorder.LastVoiceUtc -gt $script:recorder.StartedUtc) {
+            $session.Deadline=$script:recorder.StartedUtc.AddSeconds($script:shortFollowUpMaxSeconds)
+            if ($Now -ge $session.Deadline) {
+                End-Recording $false
+                $script:notice='连续接话已达到 30 秒上限，正在保留并识别这句话。'
+                return
+            }
+        }
     }
     if ($Now -ge $session.Deadline) {
         Close-ShortFollowUp '连续接话等待已超时，已回到唤醒待机。' -CancelCapture
@@ -121,15 +156,8 @@ function Update-ShortFollowUp([DateTime]$Now = [DateTime]::UtcNow) {
         if ([int]$session.PlaybackEpoch -ge 0 -and $state -notin @('playing','paused') -and -not $script:ttsJob -and $script:speechQueue.Count -eq 0) {
             Start-ShortFollowUpCapture $Now
         }
-    } elseif ($session.Phase -eq 'preparing' -and $script:recMode -eq 'listening') {
-        $session.Phase='listening'
-        $session.Deadline=$script:recorder.StartedUtc.AddSeconds($script:shortFollowUpWaitSeconds)
-        $script:notice='连续接话 · 正在听；不想继续可点“结束接话”。'
     } elseif ($session.Phase -eq 'preparing' -and $script:recMode -notin @('arming','listening')) {
         Close-ShortFollowUp '连续接话没有开始，已回到唤醒待机。'
-    } elseif ($session.Phase -eq 'listening' -and $script:recMode -in @('stopping','transcribing')) {
-        $session.Phase='recognizing'
-        $session.Deadline=$Now.AddMinutes(1)
     }
 }
 
@@ -213,6 +241,10 @@ function Try-AutoDispatch {
     if (-not $script:autoDispatch) { return }
     $intent=$script:autoDispatch
     if ($script:closing -or $intent.Generation -ne $script:voiceGeneration -or $intent.ThreadId -ne $script:threadId -or $intent.Text -ne $InputBox.Text.Trim()) {
+        $script:autoDispatch=$null; return
+    }
+    if ($intent.VoiceSource -in @('wake','follow-up') -and
+        -not (Test-ShortFollowUpGeneration $intent.FollowUpGeneration $intent.ThreadId)) {
         $script:autoDispatch=$null; return
     }
     if ($script:recMode -ne 'idle') { return }

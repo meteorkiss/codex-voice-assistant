@@ -2,6 +2,8 @@
 
 更新：2026-09-12。以下命令从项目根目录执行，使用 Windows PowerShell 5.1；WPF 测试带 `-STA`。测试样本在 `tests/fixtures`，运行产物写入 `work/tests` 或 `work/desktop-shell-render`。不应使用个人 `data` 作为测试输出目录。
 
+0.6.17 故障修正：`Test-VoiceCommands.ps1` 1290 项、`Test-HandsFree.ps1` 330 项、`Test-TranscriptRecovery.ps1` 12 项、`Test-ShortFollowUpCapture.ps1` 3 项通过；已安装 runtime Python `-B tests/test_task_matcher.py` 24 项通过。只用生成记录、真实生产回调和音频/桥接替身，未执行真人采集、播放或真实 Codex 写操作，生成文件已清理。新增切换集成样例未执行：复制源码/三组运行/递归清理的组合命令被审批拒绝，未重试或绕过。统一入口现登记 18 组；历史 17 组全量通过不是本次修正后的结果。
+
 不要把“测试进程能运行”当成声学效果验收。当前已经做过本机组件、界面、任务读取和回声对照测试；真人与答案朗读重叠说话、不同房间和第二台纯净电脑尚未验证。没有公开发布安装包。
 
 ## 纯逻辑与离屏界面回归

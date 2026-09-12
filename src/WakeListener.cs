@@ -249,7 +249,7 @@ public sealed class WakeListener : IDisposable
             if(run!=runVersion || !listening || stopping || disposed) return;
             if(values[0]=="WAKE" && NormalizePhrase(value)==normalizedPhrase)
             {
-                if(hasActivated || healthError.Length>0) return;
+                if(hasActivated || echoDetected || healthError.Length>0) return;
                 hasActivated=true;
                 lastKeyword=phrase; activatedUtc=DateTime.UtcNow; activationVersion++;
                 if(echoMode)

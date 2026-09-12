@@ -115,20 +115,24 @@ function Get-AssistantCreateVoiceCommand {
     return [pscustomobject]@{Action='createTask';Value=$title;Scope=$scope}
 }
 
-# Task names remain original text. In particular, never normalize ASR spelling,
-# change full-width characters, or resolve a title/ID inside the parser.
+# Task names remain original text. Only the command verb accepts the observed
+# ASR homophone "切换刀"; never rewrite spelling inside the title or original ASR.
 function Get-AssistantTaskVoiceCommand {
     param([AllowNull()][AllowEmptyString()][string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text) -or $Text.Length -gt 120) { return $null }
     $candidate=$Text.Trim()
     if ($candidate -match '[?？:：;；“”‘’「」『』《》〈〉"`''\\/\[\]{}<>=|#\r\n]' -or $candidate -match '[\x00-\x1f]') { return $null }
     $candidate=[regex]::Replace($candidate,'[\s。.!！]+\z','')
-    if ($candidate -match '[。.!！]') { return $null }
-    $prefix='\A(?:(?:你好[\s，,]*)?声伴(?:[\s，,]*你好)?[\s，,]*)?(?:(?:请|麻烦)(?:你)?[\s，,]*|劳驾[\s，,]*)?(?:(?:帮我|给我|替我)\s*)?'
+    # Numeric version separators are not sentence boundaries. Inspect a copy;
+    # the query keeps the user's exact characters and spacing for display.
+    $sentenceCheck=[regex]::Replace($candidate,'(?<=[0-9０-９])\s*[.．]\s*(?=[0-9０-９])','')
+    if ($sentenceCheck -match '[。.!！．]') { return $null }
+    $prefix='\A(?:(?:你好[\s，,]*)?声伴(?:[\s，,]*你好)?[\s，,]*)?(?:(?:请|麻烦)(?:你)?[\s，,]*|劳驾[\s，,]*)?(?:(?:你)?(?:帮我|给我|替我)\s*)?(?:直接\s*)?'
     $candidate=[regex]::Replace($candidate,$prefix,'')
     $candidate=[regex]::Replace($candidate,'(?:\s*一下)?(?:\s*吧)?(?:\s*[，,]?\s*谢谢)?\z','').Trim()
     if (-not $candidate -or $candidate -match '[，,、]' -or $candidate -match '(?:不要|不用|别|不想|不需要|不能|不可以|不许|不准|是否|能否|可不可以|能不能)') { return $null }
-    if ($candidate -match '(?:然后|接着|并且|同时|顺便|以及|或者|还是|(?:并|再|和|且)(?:帮我|给我|替我|请|切|打|关|显|隐|回|查|删|发|执行|总结|整理|保存|停止|开始|设置|运行|重启|继续|分析|生成|解释|修改|创建|读|播放|朗读|调|写)|任务(?:帮我|给我|替我|请|之前|之后|以后|前|后))') { return $null }
+    if ($candidate -match '(?:然后|接着|并且|同时|顺便|以及|或者|还是|(?:并|再|和|且)(?:帮我|给我|替我|请|切|打|关|显|隐|回|查|删|发|执行|总结|整理|保存|停止|开始|设置|运行|重启|继续|分析|生成|解释|修改|创建|新建|读|播放|朗读|调|写)|任务(?:帮我|给我|替我|请|之前|之后|以后|前|后))') { return $null }
+    if ($candidate -match '(?:比如|例如|如果|假设|只是|仅为|仅是|只作|只做|仅做|只用于|仅用于|用于测试|用来测试|用作测试|做个测试|做一次测试|测试一下|测试说明|测试口令|测试用|不实际|什么意思|怎么|如何|为什么)' -or $candidate -match '[吗么呢]\z') { return $null }
     $selection=[regex]::Match($candidate,'\A选择第\s*([一二三四五1-5])\s*个(?:任务)?\z')
     if ($selection.Success) {
         $numbers=@{'一'=1;'二'=2;'三'=3;'四'=4;'五'=5;'1'=1;'2'=2;'3'=3;'4'=4;'5'=5}
@@ -137,10 +141,15 @@ function Get-AssistantTaskVoiceCommand {
     if ($candidate -in @('取消任务切换','取消切换')) { return [pscustomobject]@{Action='cancelTaskSwitch';Value=$true} }
     if ($candidate -ceq '连接刚才的新任务') { return [pscustomobject]@{Action='resumeCreatedTask';Value=$true} }
     if ($candidate -ceq '放弃连接新任务') { return [pscustomobject]@{Action='cancelCreatedTaskConnection';Value=$true} }
-    $switch=[regex]::Match($candidate,'\A(?:切换到|切到)\s*(?<query>.+?)(?:的这个|这个|的)?任务\z')
+    $switch=[regex]::Match($candidate,'\A(?:切换到|切换刀|切到)\s*(?<query>.+?)(?:的这个|这个|的)?任务\z')
+    # A version-qualified task title may omit "任务". Keep bare generic
+    # "切换到台湾女声" in the settings parser and ordinary prose unchanged.
+    if (-not $switch.Success) {
+        $switch=[regex]::Match($candidate,'\A(?:切换到|切换刀|切到)\s*(?<query>.+?[vVｖＶ]\s*[0-9０-９]+(?:\s*[.．]\s*[0-9０-９]+){2,})\z')
+    }
     if (-not $switch.Success) { return $null }
     $query=$switch.Groups['query'].Value.Trim()
     if (-not $query -or $query -match '\A(?:这|那|这个|那个|当前|之前|上一个|下一个)\z') { return $null }
-    if ($query -notmatch '\A[\p{L}\p{N}\p{M}\s_\-－]+\z') { return $null }
+    if ($query -notmatch '\A[\p{L}\p{N}\p{M}\s_\-－.．·]+\z') { return $null }
     return [pscustomobject]@{Action='switchTask';Value=$query}
 }
