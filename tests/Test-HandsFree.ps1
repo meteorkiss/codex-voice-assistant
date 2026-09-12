@@ -603,6 +603,21 @@ try {
     Try-AutoDispatch
     Assert-That (-not $script:autoDispatch -and $script:autoSendPrepared -eq 0) 'A recognized question was dispatched to a changed task.'
 
+    # A preserved draft intentionally pauses wake; the UI must say why, even
+    # when Codex is busy or the hands-free toggle was just enabled again.
+    Reset-Case; Start-WakeCase
+    $InputBox.Text='用户尚未处理的草稿'; $script:busy=$true
+    Tick-And-AssertHealthy
+    Assert-That ($script:wakeListener.IsStopping -and $script:handsFreePhase -eq 'waiting') 'A draft no longer protects itself from automatic wake capture.'
+    Assert-That ($StatusLabel.Text -like '有未发送草稿*唤醒已暂停*' -and $FooterHint.Text -like '草稿已保留*') 'A draft pause was hidden by busy/preparing-wake UI.'
+    Assert-That ($InputBox.Text -ceq '用户尚未处理的草稿' -and $script:bridgeRequests.Count -eq 0) 'Displaying a draft pause changed or sent the draft.'
+    $script:wakeListener.Release(); Set-HandsFree $true
+    Tick-And-AssertHealthy
+    Assert-That ($StatusLabel.Text -like '有未发送草稿*' -and -not $script:wakeListener.IsListening) 'Re-enabling hands-free hid the draft pause or overwrote protection.'
+    $InputBox.Text=''; $script:nextWakeUtc=[DateTime]::MinValue
+    Tick-And-AssertHealthy
+    Assert-That ($script:wakeListener.IsListening -and $StatusLabel.Text -notlike '有未发送草稿*') 'Removing the draft did not recover wake listening and its UI.'
+
     # Physical release alone is insufficient until MicGuard observes a fresh idle scan.
     Reset-Case; Start-WakeCase
     $script:wakeListener.Activate(); Update-HandsFree ([DateTime]::UtcNow)

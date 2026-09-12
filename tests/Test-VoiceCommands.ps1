@@ -72,7 +72,17 @@ foreach($entry in @(
  @('切换到声伴 v0.6.17 · 短时连续接话任务','声伴 v0.6.17 · 短时连续接话'),
  @('帮我切换到声伴V0.6.17','声伴V0.6.17'),
  @('帮我切换刀声伴 V 0 . 6 . 17','声伴 V 0 . 6 . 17'),
- @('切换刀刀锋 V0.6.17任务','刀锋 V0.6.17')
+ @('切换刀刀锋 V0.6.17任务','刀锋 V0.6.17'),
+ @('切刀声伴V0.6.17任务','声伴V0.6.17'),
+ @('切刀语音助手MVP','语音助手MVP'),
+ @('切到语音助手MVP','语音助手MVP'),
+ @('切换到语音助手MVP','语音助手MVP'),
+ @('切换刀语音助手MVP','语音助手MVP'),
+ @('帮我切刀语音助手MVP任务','语音助手MVP'),
+ @('声伴，请帮我切刀语音助手 MVP 吧，谢谢。','语音助手 MVP'),
+ @('切到 Gaussian Splatting','Gaussian Splatting'),
+ @('你帮我直接切刀刀锋  实验','刀锋  实验'),
+ @('切换到高斯泼溅','高斯泼溅')
 )) { Assert-Command $entry[0] 'switchTask' $entry[1] }
 foreach($text in @(
  '不要帮我切换刀声伴V0.6.17任务','帮我不要切换刀声伴V0.6.17任务',
@@ -83,8 +93,21 @@ foreach($text in @(
  '切换刀声伴V0.6.17任务帮我查天气','切换刀声伴V0.6.17再帮我查天气',
  '切换刀声伴V0.6.17并打开设置','先切换刀声伴V0.6.17任务再总结',
  '切换到声伴。V0.6.17任务','切换到声伴.V0.6.17任务','切换到声伴V0..6.17任务',
- '切换到声伴V0.6.17。显示字幕','切换到声伴V0.6.17!任务','切刀声伴V0.6.17任务'
+ '切换到声伴V0.6.17。显示字幕','切换到声伴V0.6.17!任务',
+ '不要切刀语音助手MVP','帮我不要切刀语音助手MVP','切刀语音助手MVP吗',
+ '“切刀语音助手MVP”','我说的是切刀语音助手MVP','如果切刀语音助手MVP',
+ '切刀语音助手MVP只是测试','切刀语音助手MVP是什么意思',
+ '切刀语音助手MVP然后查天气','切刀语音助手MVP并打开设置',
+ '切刀语音助手MVP再帮我查天气','切刀语音助手MVP帮我查天气',
+ '切到语音助手MVP之前先保存','切刀语音助手MVP，打开设置',
+ '切刀那个','切刀刚才那个','切刀任务','切刀','切到语音助手。MVP'
 )) { Assert-Routed $text }
+# The broad title fallback runs last, so existing setting targets keep priority.
+Assert-Command '帮我切换到台湾女声' 'voice' 'zh-TW-HsiaoChenNeural'
+Assert-Command '切换到普通话女声晓晓' 'voice' 'zh-CN-XiaoxiaoNeural'
+Assert-Command '切换到台湾女声任务' 'switchTask' '台湾女声'
+if ($null -ne (Get-AssistantTaskVoiceCommand '切到语音助手MVP')) { throw 'Bare title intercepted before settings could parse.' }; $checks++
+if ((Get-AssistantTaskVoiceCommand '切到语音助手MVP' -AllowBareTitle).Value -cne '语音助手MVP') { throw 'Bare title lookup lost the original target.' }; $checks++
 foreach($entry in @(@('一',1),@('二',2),@('三',3),@('四',4),@('五',5),@('1',1),@('5',5))) {
  Assert-Command ('选择第'+$entry[0]+'个任务') 'chooseTask' $entry[1]
  Assert-Command ('选择第'+$entry[0]+'个') 'chooseTask' $entry[1]
@@ -97,7 +120,7 @@ Assert-Command '声伴，请取消切换吧' 'cancelTaskSwitch' $true
 Assert-Command '声伴，请选择第二个吧' 'chooseTask' 2
 foreach($text in @('选择第二个是什么意思','选择第二个？','不要选择第二个','不要取消切换','怎么取消切换','“取消切换”','选择第二个，然后继续','选择第六个')) { Assert-Routed $text }
 foreach($text in @(
- '切换到任务','切换到这个任务','切到那个任务','切换任务','切换到高斯泼溅','选择第六个任务','选择第零个任务',
+ '切换到任务','切换到这个任务','切到那个任务','切换任务','选择第六个任务','选择第零个任务',
  '不要切换到高斯坡建任务','别切到高斯坡建任务','不用选择第一个任务','不要取消任务切换',
  '怎么切换到高斯坡建任务','能否切到高斯坡建任务','可以切换到高斯坡建任务吗','切换到高斯坡建任务？',
  '他说切换到高斯坡建任务','我刚才说了选择第一个任务','解释选择第二个任务','“切到高斯坡建任务”',

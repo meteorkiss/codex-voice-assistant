@@ -519,6 +519,7 @@ try {
                 elseif ($script:pendingUncertain) { '发送状态待确认 · 请在 Codex 核对' }
                 elseif ($script:handsFreeEnabled -and (Test-WakeRecoveryPending)) { $script:wakeRecovery.Message }
                 elseif ($script:handsFreePhase -in @('releasing','answering-wake','acknowledging')) { '在 · 请说你的问题' }
+                elseif ($script:handsFreeEnabled -and $InputBox.Text.Trim()) { '有未发送草稿 · 唤醒已暂停 · 请打开字幕处理' }
                 elseif ($script:bindingReadError) { '任务连接异常 · 普通消息暂停 · 可语音切换任务' }
                 elseif ($playbackState -eq 'paused') { if ($script:playbackNotice) { $script:playbackNotice } else { '已暂停朗读，点击继续可接着听。' } }
                 elseif ($playing) { '正在朗读 · '+$VoiceCombo.SelectedItem.name }
@@ -535,7 +536,7 @@ try {
             $SendButton.IsEnabled=($localReady -or ($script:connected -and -not $script:bindingReadError -and -not $script:bridgeJob -and $script:recMode -ne 'arming' -and -not $script:pendingUncertain))
             $StopButton.Content=if ($script:shortFollowUp -or $script:followUpCapture) { '结束接话' } elseif ($script:recMode -ne 'idle') { '取消录音' } else { '停止朗读' }
             $AnswerStateLabel.Text=if ($script:busy) { '处理中' } elseif ($playing) { '正在朗读' } else { '文字 · 语音' }
-            $FooterHint.Text=if ($script:shortFollowUp -or $script:followUpCapture) { '连续接话有时限 · 可随时点“结束接话”' } elseif ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
+            $FooterHint.Text=if ($script:shortFollowUp -or $script:followUpCapture) { '连续接话有时限 · 可随时点“结束接话”' } elseif ($script:handsFreeEnabled -and $script:recMode -eq 'idle' -and $InputBox.Text.Trim()) { '草稿已保留 · 发送或自行清空后恢复唤醒；也可点击开始说话继续补充' } elseif ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
             if ($followUpItem) { $followUpItem.Enabled=[bool]($script:shortFollowUp -or $script:followUpCapture) }
             Update-DesktopDisplay
             if ($script:positionDirty -and ($now-$script:lastPositionChange).TotalMilliseconds -gt 700) { $script:positionDirty=$false; Save-Settings }
@@ -585,6 +586,7 @@ try {
             $statusData.wakeAcceptedActivationVersion=$script:lastWakeVersion
             $statusData.wakeStopping=$script:wakeListener.IsStopping
             $statusData.draftPending=[bool]$InputBox.Text.Trim()
+            $statusData.wakeBlockedByDraft=[bool]($script:handsFreeEnabled -and $script:recMode -eq 'idle' -and $InputBox.Text.Trim())
             $statusData.wakeError=$script:wakeListener.Error
             $statusData.micGuardError=$script:mic.LastError
             $statusData.micGuardScanCount=$script:mic.ScanCount

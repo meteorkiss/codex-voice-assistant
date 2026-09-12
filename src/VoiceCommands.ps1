@@ -67,7 +67,9 @@ function Get-AssistantVoiceCommand {
     }
 
     if ($action) { return [pscustomobject]@{ Action=$action; Value=$value } }
-    return $null
+    # A bare task title is a local lookup only after known settings have had
+    # their turn; "切换到台湾女声" must not become a task search.
+    return Get-AssistantTaskVoiceCommand $Text -AllowBareTitle
 }
 
 # Creating is deliberately separate from task lookup: a trailing title must not
@@ -116,9 +118,9 @@ function Get-AssistantCreateVoiceCommand {
 }
 
 # Task names remain original text. Only the command verb accepts the observed
-# ASR homophone "切换刀"; never rewrite spelling inside the title or original ASR.
+# ASR homophones "切换刀" / "切刀"; never rewrite the title or original ASR.
 function Get-AssistantTaskVoiceCommand {
-    param([AllowNull()][AllowEmptyString()][string]$Text)
+    param([AllowNull()][AllowEmptyString()][string]$Text, [switch]$AllowBareTitle)
     if ([string]::IsNullOrWhiteSpace($Text) -or $Text.Length -gt 120) { return $null }
     $candidate=$Text.Trim()
     if ($candidate -match '[?？:：;；“”‘’「」『』《》〈〉"`''\\/\[\]{}<>=|#\r\n]' -or $candidate -match '[\x00-\x1f]') { return $null }
@@ -141,15 +143,24 @@ function Get-AssistantTaskVoiceCommand {
     if ($candidate -in @('取消任务切换','取消切换')) { return [pscustomobject]@{Action='cancelTaskSwitch';Value=$true} }
     if ($candidate -ceq '连接刚才的新任务') { return [pscustomobject]@{Action='resumeCreatedTask';Value=$true} }
     if ($candidate -ceq '放弃连接新任务') { return [pscustomobject]@{Action='cancelCreatedTaskConnection';Value=$true} }
-    $switch=[regex]::Match($candidate,'\A(?:切换到|切换刀|切到)\s*(?<query>.+?)(?:的这个|这个|的)?任务\z')
+    $switchVerb='(?:切换到|切换刀|切到|切刀)'
+    $switch=[regex]::Match($candidate,('\A'+$switchVerb+'\s*(?<query>.+?)(?:的这个|这个|的)?任务\z'))
     # A version-qualified task title may omit "任务". Keep bare generic
     # "切换到台湾女声" in the settings parser and ordinary prose unchanged.
     if (-not $switch.Success) {
-        $switch=[regex]::Match($candidate,'\A(?:切换到|切换刀|切到)\s*(?<query>.+?[vVｖＶ]\s*[0-9０-９]+(?:\s*[.．]\s*[0-9０-９]+){2,})\z')
+        $switch=[regex]::Match($candidate,('\A'+$switchVerb+'\s*(?<query>.+?[vVｖＶ]\s*[0-9０-９]+(?:\s*[.．]\s*[0-9０-９]+){2,})\z'))
+    }
+    $bareTitle=$false
+    if (-not $switch.Success -and $AllowBareTitle) {
+        $switch=[regex]::Match($candidate,('\A'+$switchVerb+'\s*(?<query>.+)\z'))
+        $bareTitle=$switch.Success
     }
     if (-not $switch.Success) { return $null }
     $query=$switch.Groups['query'].Value.Trim()
-    if (-not $query -or $query -match '\A(?:这|那|这个|那个|当前|之前|上一个|下一个)\z') { return $null }
+    if (-not $query -or $query -match '\A(?:任务|这|那|这个|那个|当前|之前|上一个|下一个)\z') { return $null }
+    # Without the task noun there is no explicit end marker. Keep apparent
+    # extra instructions and unresolved references out of this lookup route.
+    if ($bareTitle -and $query -match '(?:帮我|给我|替我|请|之前|之后|以后|刚才那个|刚才的|那个任务|这个任务)') { return $null }
     if ($query -notmatch '\A[\p{L}\p{N}\p{M}\s_\-－.．·]+\z') { return $null }
     return [pscustomobject]@{Action='switchTask';Value=$query}
 }
