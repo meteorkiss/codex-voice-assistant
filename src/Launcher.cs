@@ -32,6 +32,7 @@ internal static class Launcher
                 @"src\PendingSends.ps1", @"src\WorkerLifecycle.ps1",
                 @"src\CodexAdapter.ps1", @"src\PreferenceActions.ps1",
                 @"src\AudioOutput.ps1",
+                @"src\DraftRecovery.ps1", @"src\BindingRecovery.ps1",
                 "Start.ps1", @"src\Assistant.ps1", @"src\reader-core.ps1",
                 @"src\AudioPlayer.cs", @"src\AudioBootstrap.ps1", @"src\EchoCapture.cs",
                 @"src\MicGuard.cs", @"src\JarvisRecorder.cs",

@@ -25,6 +25,10 @@ class SendTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(dir=RUN_ROOT)
         self.addCleanup(self.tmp.cleanup)
         self.request_id = str(uuid.uuid4())
+        state = patch.object(bridge, 'binding_state', return_value={
+            'threadId': TEST_THREAD, 'state': 'active', 'archived': False})
+        state.start()
+        self.addCleanup(state.stop)
 
     def send(self, text='中文与引号 " $() ` 保持原文', request_id=None):
         return bridge.send_once('unused', TEST_THREAD, text,
@@ -40,6 +44,26 @@ class SendTests(unittest.TestCase):
             arguments = call.call_args.args[2]
             self.assertEqual(set(arguments), {'threadId', 'hostId', 'prompt'})
             self.assertIn('$()', arguments['prompt'])
+
+    def test_archive_at_actual_dispatch_is_definitely_rejected_and_never_sent(self):
+        with patch.object(bridge, 'binding_state', return_value={
+                'threadId': TEST_THREAD, 'state': 'archived', 'archived': True}), \
+                patch.object(bridge, 'app_tool') as call:
+            with self.assertRaises(bridge.BridgeError) as error:
+                self.send()
+        self.assertEqual(error.exception.code, 'task_archived')
+        self.assertFalse(error.exception.uncertain)
+        call.assert_not_called()
+        with sqlite3.connect(Path(self.tmp.name) / 'send-ledger.sqlite3') as db:
+            self.assertEqual(db.execute('SELECT state FROM sends WHERE request_id=?',
+                                        (self.request_id,)).fetchone()[0], 'rejected')
+        db.close()
+        with patch.object(bridge, 'app_tool') as call:
+            with self.assertRaises(bridge.BridgeError) as duplicate:
+                self.send()
+        self.assertEqual(duplicate.exception.code, 'duplicate_suppressed')
+        self.assertFalse(duplicate.exception.uncertain)
+        call.assert_not_called()
 
     def test_uncertain_send_never_replayed(self):
         with patch.object(bridge, 'app_tool', side_effect=bridge.BridgeError('send_unknown', 'timeout', True)) as call:
@@ -171,8 +195,63 @@ class SendTests(unittest.TestCase):
             self.assertEqual(second.exception.code, 'duplicate_suppressed')
             call.assert_not_called()
 
+    def test_archive_rejection_never_relabels_unknown_or_pending_as_unsent(self):
+        for stored_state in ('unknown', 'pending'):
+            with self.subTest(state=stored_state):
+                request_id = str(uuid.uuid4())
+                with patch.object(bridge, 'app_tool', side_effect=bridge.BridgeError('send_unknown', 'unknown', True)):
+                    with self.assertRaises(bridge.BridgeError):
+                        self.send('原始草稿', request_id)
+                with sqlite3.connect(Path(self.tmp.name) / 'send-ledger.sqlite3') as db:
+                    db.execute('UPDATE sends SET state=? WHERE request_id=?', (stored_state, request_id))
+                db.close()
+                with patch.object(bridge, 'binding_state') as state, \
+                        patch.object(bridge, 'discover_pipe') as discover, \
+                        patch.object(bridge, 'send_once') as send:
+                    with self.assertRaises(bridge.BridgeError) as error:
+                        bridge.handle({'action': 'send', 'threadId': TEST_THREAD, 'text': '原始草稿',
+                                       'requestId': request_id, 'stateDir': self.tmp.name})
+                self.assertEqual(error.exception.code, 'duplicate_suppressed')
+                self.assertTrue(error.exception.uncertain)
+                for operation in (state, discover, send):
+                    operation.assert_not_called()
+
+    def test_accepted_ledger_receipt_still_returns_without_new_send_or_archive_check(self):
+        with patch.object(bridge, 'app_tool', return_value={'threadId': TEST_THREAD}):
+            self.send('原文')
+        with patch.object(bridge, 'binding_state') as state, \
+                patch.object(bridge, 'discover_pipe') as discover, patch.object(bridge, 'send_once') as send:
+            out = bridge.handle({'action': 'send', 'threadId': TEST_THREAD, 'text': '原文',
+                                 'requestId': self.request_id, 'stateDir': self.tmp.name})
+        self.assertTrue(out['accepted'])
+        self.assertTrue(out['duplicateSuppressed'])
+        for operation in (state, discover, send):
+            operation.assert_not_called()
+
+    def test_unreadable_send_ledger_blocks_before_state_check_and_stays_uncertain(self):
+        (Path(self.tmp.name) / 'send-ledger.sqlite3').write_bytes(b'not sqlite')
+        with patch.object(bridge, 'binding_state') as state, patch.object(bridge, 'send_once') as send:
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.handle({'action': 'send', 'threadId': TEST_THREAD, 'text': '原文',
+                               'requestId': self.request_id, 'stateDir': self.tmp.name})
+        self.assertEqual(error.exception.code, 'send_ledger_unavailable')
+        self.assertTrue(error.exception.uncertain)
+        state.assert_not_called()
+        send.assert_not_called()
+
 
 class ReadTests(unittest.TestCase):
+    def setUp(self):
+        # These tests isolate App Tools answer parsing; the full SQLite-backed
+        # archive validation is exercised separately in BootstrapTests below.
+        state = patch.object(bridge, 'binding_state', return_value={
+            'threadId': TEST_THREAD, 'state': 'active', 'archived': False})
+        state.start()
+        self.addCleanup(state.stop)
+        ledger = patch.object(bridge, 'existing_send_result', return_value=None)
+        ledger.start()
+        self.addCleanup(ledger.stop)
+
     def test_only_last_final_from_completed_turn_is_latest(self):
         result = {
             'thread': {'id': TEST_THREAD, 'kind': 'codex', 'hostId': 'local', 'status': {'type': 'active'}},
@@ -188,6 +267,8 @@ class ReadTests(unittest.TestCase):
             out = bridge.read_task('unused', TEST_THREAD)
         self.assertEqual(out['lastAssistantText'], '正确答案')
         self.assertEqual(out['status'], 'active')
+        self.assertFalse(out['archived'])
+        self.assertEqual(out['bindingState'], 'active')
         self.assertNotIn('private', json.dumps(out))
 
     def test_reject_other_thread(self):
@@ -275,7 +356,7 @@ class BootstrapTests(unittest.TestCase):
         return row
 
     def test_no_task_fails_before_discovery_for_targeted_actions(self):
-        for action in ('read', 'send', 'open', 'create', 'create-status', 'manage'):
+        for action in ('read', 'binding-state', 'send', 'open', 'create', 'create-status', 'manage'):
             for value in (None, '', '  '):
                 with self.subTest(action=action, value=value), patch.object(bridge, 'discover_pipe') as call:
                     request = {'action': action}
@@ -285,6 +366,185 @@ class BootstrapTests(unittest.TestCase):
                         bridge.handle(request)
                     self.assertEqual(error.exception.code, 'thread_required')
                     call.assert_not_called()
+
+    def test_binding_state_invalid_id_fails_before_any_index_or_connection_access(self):
+        for value in (None, '', 'not-a-uuid', [], {}):
+            with self.subTest(value=value), patch.object(bridge, 'codex_home') as home, \
+                    patch.object(bridge, 'discover_pipe') as discover, patch.object(bridge, 'app_tool') as call:
+                with self.assertRaises(bridge.BridgeError):
+                    bridge.handle({'action': 'binding-state', 'threadId': value})
+                for operation in (home, discover, call):
+                    operation.assert_not_called()
+
+    def test_binding_state_observes_live_wal_archive_and_delete_without_pipe_or_content(self):
+        db = self.index()
+        self.addCleanup(db.close)
+        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('PRAGMA wal_autocheckpoint=0')
+        row = self.add_task(db)
+        with patch.object(bridge, 'discover_pipe') as discover, patch.object(bridge, 'app_tool') as call, \
+                patch.object(bridge, 'rollout_path') as paths, patch.object(bridge, 'is_subagent') as content:
+            for expected, archived in (('active', 0), ('archived', 1), ('active', 0)):
+                db.execute('UPDATE threads SET archived=? WHERE id=?', (archived, row['id']))
+                db.commit()
+                before = db.execute('SELECT * FROM threads').fetchall()
+                out = bridge.handle({'action': 'binding-state', 'threadId': row['id']})
+                self.assertEqual(out, {'threadId': row['id'], 'state': expected, 'archived': bool(archived)})
+                self.assertEqual(db.execute('SELECT * FROM threads').fetchall(), before)
+            db.execute('DELETE FROM threads WHERE id=?', (row['id'],))
+            db.commit()
+            self.assertEqual(bridge.handle({'action': 'binding-state', 'threadId': row['id']}),
+                             {'threadId': row['id'], 'state': 'missing', 'archived': False})
+        for operation in (discover, call, paths, content):
+            operation.assert_not_called()
+
+    def test_binding_state_does_not_infer_archive_from_missing_or_moved_rollout(self):
+        with self.index() as db:
+            row = self.add_task(db)
+        db.close()
+        Path(row['rollout_path']).unlink()
+        out = bridge.handle({'action': 'binding-state', 'threadId': row['id']})
+        self.assertEqual((out['state'], out['archived']), ('active', False))
+
+    def test_binding_state_rejects_nonlocal_or_child_identity_even_when_archived(self):
+        with self.index(extra=', host_id TEXT DEFAULT "local", kind TEXT DEFAULT "codex", parent_thread_id TEXT') as db:
+            for values in ({'agent_path': '/root/child'}, {'parent_thread_id': str(uuid.uuid4())},
+                           {'source': '{"subagent":{}}'}, {'thread_source': 'subagent'},
+                           {'source': 'remote'}, {'host_id': 'remote'}, {'kind': 'chatgpt'},
+                           {'cwd': '\\\\server\\share'}, {'cwd': 'relative'}):
+                for archived in (0, 1):
+                    with self.subTest(values=values, archived=archived):
+                        row = self.add_task(db, archived=archived, **values)
+                        with self.assertRaises(bridge.BridgeError) as error:
+                            bridge.handle({'action': 'binding-state', 'threadId': row['id']})
+                        self.assertEqual(error.exception.code, 'wrong_target')
+        db.close()
+
+    def test_binding_state_requires_explicit_boolean_archive_value(self):
+        with self.index() as db:
+            for value in (None, 2, -1, 'false', 'unknown'):
+                with self.subTest(value=value):
+                    row = self.add_task(db, archived=value)
+                    with self.assertRaises(bridge.BridgeError) as error:
+                        bridge.handle({'action': 'binding-state', 'threadId': row['id']})
+                    self.assertEqual(error.exception.code, 'index_unavailable')
+        db.close()
+
+    def test_binding_state_missing_index_is_an_error_not_archived_or_missing_task(self):
+        with self.assertRaises(bridge.BridgeError) as error:
+            bridge.handle({'action': 'binding-state', 'threadId': TEST_THREAD})
+        self.assertEqual(error.exception.code, 'index_not_found')
+        self.assertEqual(list(self.root.glob('state_*.sqlite')), [])
+
+    def test_binding_state_newest_schema_corruption_and_permission_errors_never_fall_back(self):
+        with self.index() as db:
+            self.add_task(db, id=TEST_THREAD, archived=1)
+        db.close()
+        newer = self.root / 'state_6.sqlite'
+        with sqlite3.connect(newer) as db:
+            db.execute('CREATE TABLE threads (id TEXT)')
+        db.close()
+        with self.assertRaises(bridge.BridgeError) as error:
+            bridge.handle({'action': 'binding-state', 'threadId': TEST_THREAD})
+        self.assertEqual(error.exception.code, 'unsupported_index_schema')
+        newer.write_bytes(b'not sqlite')
+        with self.assertRaises(bridge.BridgeError) as error:
+            bridge.handle({'action': 'binding-state', 'threadId': TEST_THREAD})
+        self.assertEqual(error.exception.code, 'index_unavailable')
+        with patch.object(bridge.sqlite3, 'connect', side_effect=PermissionError('denied')):
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.handle({'action': 'binding-state', 'threadId': TEST_THREAD})
+        self.assertEqual(error.exception.code, 'index_unavailable')
+
+    def test_read_returns_reliable_archive_state_without_forbidding_recovery_read(self):
+        with self.index() as db:
+            row = self.add_task(db)
+            result = {'thread': {'id': row['id'], 'kind': 'codex', 'hostId': 'local'}}
+            with patch.object(bridge, 'app_tool', return_value=result) as call, \
+                    patch.object(bridge, 'rollout_path', return_value=None):
+                for archived in (0, 1):
+                    db.execute('UPDATE threads SET archived=? WHERE id=?', (archived, row['id']))
+                    db.commit()
+                    out = bridge.read_task('unused', row['id'])
+                    self.assertEqual(out['archived'], bool(archived))
+                    self.assertEqual(out['bindingState'], 'archived' if archived else 'active')
+                self.assertTrue(all(item.args[1] == 'read_thread' for item in call.call_args_list))
+        db.close()
+
+    def test_read_does_not_guess_archive_when_index_is_missing_or_unavailable(self):
+        db = self.index()
+        db.close()
+        result = {'thread': {'id': TEST_THREAD, 'kind': 'codex', 'hostId': 'local'}}
+        with patch.object(bridge, 'app_tool', return_value=result):
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.read_task('unused', TEST_THREAD)
+            self.assertEqual(error.exception.code, 'task_unavailable')
+        (self.root / 'state_5.sqlite').write_bytes(b'not sqlite')
+        with patch.object(bridge, 'app_tool', return_value=result):
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.read_task('unused', TEST_THREAD)
+            self.assertEqual(error.exception.code, 'index_unavailable')
+
+    def test_send_archived_missing_or_unverifiable_target_is_definitely_blocked_before_pipe(self):
+        with self.index() as db:
+            archived = self.add_task(db, archived=1)
+        db.close()
+        for task_id, code in ((archived['id'], 'task_archived'), (TEST_THREAD, 'task_unavailable')):
+            with self.subTest(code=code), patch.object(bridge, 'discover_pipe') as discover, \
+                    patch.object(bridge, 'send_once') as send:
+                with self.assertRaises(bridge.BridgeError) as error:
+                    bridge.handle({'action': 'send', 'threadId': task_id, 'text': '未发送的草稿',
+                                   'requestId': str(uuid.uuid4()), 'stateDir': str(self.root)})
+                self.assertEqual(error.exception.code, code)
+                self.assertFalse(error.exception.uncertain)
+                discover.assert_not_called()
+                send.assert_not_called()
+        (self.root / 'state_5.sqlite').write_bytes(b'not sqlite')
+        with patch.object(bridge, 'send_once') as send:
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.handle({'action': 'send', 'threadId': TEST_THREAD, 'text': '未发送的草稿',
+                               'requestId': str(uuid.uuid4()), 'stateDir': str(self.root)})
+        self.assertEqual(error.exception.code, 'task_unavailable')
+        self.assertFalse(error.exception.uncertain)
+        send.assert_not_called()
+        self.assertFalse((self.root / 'send-ledger.sqlite3').exists())
+
+    def test_send_rechecks_archive_after_live_read_before_send_once(self):
+        with self.index() as db:
+            row = self.add_task(db)
+        db.close()
+
+        def archive_during_read(*args, **kwargs):
+            with sqlite3.connect(self.root / 'state_5.sqlite') as changed:
+                changed.execute('UPDATE threads SET archived=1 WHERE id=?', (row['id'],))
+            changed.close()
+            return {'thread': {'id': row['id'], 'kind': 'codex', 'hostId': 'local'}}
+
+        with patch.object(bridge, 'discover_pipe', return_value='unused'), \
+                patch.object(bridge, 'app_tool', side_effect=archive_during_read), \
+                patch.object(bridge, 'rollout_path', return_value=None), \
+                patch.object(bridge, 'send_once') as send:
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.handle({'action': 'send', 'threadId': row['id'], 'text': '未发送的草稿',
+                               'requestId': str(uuid.uuid4()), 'stateDir': str(self.root)})
+        self.assertEqual(error.exception.code, 'task_archived')
+        self.assertFalse(error.exception.uncertain)
+        send.assert_not_called()
+
+    def test_send_active_verified_local_target_reaches_send_once(self):
+        with self.index() as db:
+            row = self.add_task(db)
+        db.close()
+        result = {'thread': {'id': row['id'], 'kind': 'codex', 'hostId': 'local'}}
+        request_id = str(uuid.uuid4())
+        with patch.object(bridge, 'discover_pipe', return_value='unused'), \
+                patch.object(bridge, 'app_tool', return_value=result), \
+                patch.object(bridge, 'rollout_path', return_value=None), \
+                patch.object(bridge, 'send_once', return_value={'accepted': True}) as send:
+            out = bridge.handle({'action': 'send', 'threadId': row['id'], 'text': '原始草稿',
+                                 'requestId': request_id, 'stateDir': str(self.root)})
+        self.assertTrue(out['accepted'])
+        send.assert_called_once_with('unused', row['id'], '原始草稿', request_id, str(self.root))
 
     def test_first_launch_lists_candidates_without_pipe_or_source_task(self):
         with self.index() as db:

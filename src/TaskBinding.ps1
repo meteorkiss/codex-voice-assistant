@@ -1,5 +1,6 @@
 ﻿# Shared binding validation and commit. Importing this module has no state effects.
 function Get-TaskBindingBlockReason {
+    param([switch]$IgnoreDraft)
     if ($script:closing) { return '程序正在退出，暂不连接任务。' }
     if ($script:recMode -ne 'idle' -or $script:asrJob -or $script:handsFreePhase -in @('releasing','answering-wake','acknowledging')) {
         return '请先完成这次录音，再连接任务。'
@@ -8,13 +9,14 @@ function Get-TaskBindingBlockReason {
         return '上次发送仍待核对，请先确认发送结果。'
     }
     if ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { return '消息正在发送，请收到回执后再连接任务。' }
-    if (($InputBox -and $InputBox.Text.Trim()) -or $script:autoDispatch) { return '文字草稿已保留，请先发送或清空，再连接任务。' }
+    if ($script:autoDispatch -or (-not $IgnoreDraft -and $InputBox -and $InputBox.Text.Trim())) { return '文字草稿已保留，请先处理后再连接任务。' }
     return ''
 }
 
 function Test-TaskBindingResult($Result, [string]$TargetThreadId) {
     $id=[Guid]::Empty
     return [bool]($Result -and $Result.ok -is [bool] -and $Result.ok -and
+        $Result.archived -ne $true -and $Result.bindingState -notin @('archived','missing') -and
         [Guid]::TryParse($TargetThreadId,[ref]$id) -and $Result.threadId -is [string] -and
         $Result.threadId -ceq $TargetThreadId -and (-not $Result.hostId -or $Result.hostId -eq 'local') -and
         $Result.rolloutPath -is [string] -and -not [string]::IsNullOrWhiteSpace($Result.rolloutPath) -and
@@ -38,7 +40,7 @@ function Invoke-TaskBindingCommit {
     if ($blocked) { throw $blocked }
     if (-not (Test-TaskBindingResult $Result $TargetThreadId)) { throw '目标任务回执不完整，保留原任务。' }
     $before=@{}
-    foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion','bindingReadError')) {
+    foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion','bindingReadError','bindingAvailability','bindingAvailabilityError','bindingGeneration','lastBindingProbe')) {
         $before[$key]=Get-Variable -Name $key -Scope Script -ValueOnly -ErrorAction SilentlyContinue
     }
     $before.TaskText=$TaskLabel.Text; $before.TaskTip=$TaskLabel.ToolTip
@@ -51,7 +53,7 @@ function Invoke-TaskBindingCommit {
     } catch {
         # Persisting either settings or the caller's connection receipt can fail.
         # Restore the former destination before returning that failure.
-        foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion','bindingReadError')) {
+        foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion','bindingReadError','bindingAvailability','bindingAvailabilityError','bindingGeneration','lastBindingProbe')) {
             Set-Variable -Name $key -Scope Script -Value $before[$key]
         }
         $TaskLabel.Text=$before.TaskText; $TaskLabel.ToolTip=$before.TaskTip
@@ -81,13 +83,16 @@ function Reset-ManualTaskBinding([string]$Message='') {
 function Begin-ManualTaskBinding {
     param([string]$TargetThreadId, [switch]$Startup)
     Reset-ManualTaskBinding
-    $blocked=Get-TaskBindingBlockReason
+    $blocked=Get-TaskBindingBlockReason -IgnoreDraft
     if ($blocked) { $script:notice=$blocked; return $false }
     if ($script:bridgeJob) { $script:notice='上一项操作仍在处理，请稍后连接。'; return $false }
     $id=[Guid]::Empty
     if (-not [Guid]::TryParse($TargetThreadId,[ref]$id)) { $script:notice='请先选择一个有效的本机任务。'; return $false }
     if (-not $Startup) {
         if (-not $TaskCombo.SelectedItem -or $TaskCombo.SelectedItem.threadId -cne $TargetThreadId) { return $false }
+        if ($InputBox -and $InputBox.Text.Trim()) {
+            if (-not (Save-InputDraftForRecovery '用户明确连接所选任务，旧文字未转发')) { return $false }
+        }
         Invalidate-VoiceTaskCreateBinding -Reason '已手动选择要连接的任务' -ReleaseSendBlock
         Reset-VoiceTaskSwitch
     }
@@ -133,6 +138,13 @@ function Complete-ManualTaskBinding {
     if ($reason) { Reset-ManualTaskBinding $reason; return $false }
     # Consume the context before applying: a duplicate callback cannot commit.
     $script:manualTaskBinding=$null
+    if ($Result -and $Result.ok -is [bool] -and $Result.ok -and $Result.threadId -ceq $pending.TargetThreadId -and $Result.archived -is [bool] -and $Result.archived) {
+        if ($pending.Startup -and $pending.TargetThreadId -ceq $script:threadId) {
+            if ($Result.title) { $TaskLabel.Text=[string]$Result.title; $TaskLabel.ToolTip=[string]$Result.title }
+            [void](Enter-TaskBindingRecovery 'archived')
+        } else { $script:notice='所选任务已归档，未连接；请选择活动任务。' }
+        return $false
+    }
     try { Invoke-TaskBindingCommit $Result $pending.TargetThreadId }
     catch { $script:notice='连接没有完成或保存失败，已保留原任务，请重试。'; return $false }
     $script:notice='任务已连接，接下来的话会发送到这个任务。'

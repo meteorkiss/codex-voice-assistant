@@ -88,7 +88,7 @@ function Test-WakeRecoveryReleased {
 }
 
 function Test-WakeRecoveryCanStart {
-    if ($script:closing -or -not $script:handsFreeEnabled -or -not $script:connected -or
+    if ($script:closing -or -not $script:handsFreeEnabled -or (-not $script:connected -and $script:bindingAvailability -notin @('archived','missing')) -or
         $script:recMode -ne 'idle' -or $script:asrJob -or $script:autoDispatch -or $script:pendingUncertain -or
         ($script:bridgeJob -and $script:bridgeJob.Purpose -notin @('list','open')) -or
         ($InputBox -and $InputBox.Text.Trim()) -or $script:ttsJob -or
@@ -184,7 +184,7 @@ function Update-WakeRecovery([DateTime]$Now=[DateTime]::UtcNow) {
         return
     }
     if ($state.Phase -eq 'starting') {
-        if (-not $script:connected -or $script:recMode -ne 'idle' -or $script:asrJob -or $script:autoDispatch -or
+        if ((-not $script:connected -and $script:bindingAvailability -notin @('archived','missing')) -or $script:recMode -ne 'idle' -or $script:asrJob -or $script:autoDispatch -or
             $script:pendingUncertain -or $script:voiceGeneration -ne $state.StartGeneration -or
             ($script:bridgeJob -and $script:bridgeJob.Purpose -notin @('list','open')) -or
             ($InputBox -and $InputBox.Text.Trim()) -or (Test-ExternalCapture)) {

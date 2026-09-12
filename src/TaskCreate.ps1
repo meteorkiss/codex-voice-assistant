@@ -117,7 +117,7 @@ function Begin-VoiceTaskCreate([string]$Title='', [string]$Scope='projectless') 
     }
     if ($script:bridgeJob) { Set-VoiceTaskCreateNotice '连接仍在处理，请稍后再新建任务。'; return $true }
     $source=[Guid]::Empty
-    if (-not $script:connected -or -not [Guid]::TryParse([string]$script:threadId,[ref]$source)) { Set-VoiceTaskCreateNotice '请先连接一个本机 Codex 任务，再创建新任务。'; return $true }
+    if ((-not $script:connected -and $script:bindingAvailability -ne 'archived') -or -not [Guid]::TryParse([string]$script:threadId,[ref]$source)) { Set-VoiceTaskCreateNotice '请先连接一个本机 Codex 任务，再创建新任务。'; return $true }
     $titleText=([string]$Title).Trim()
     if ($titleText.Length -gt 120) { Set-VoiceTaskCreateNotice '任务名称请控制在一百二十个字以内。'; return $true }
     if ($Scope -notin @('projectless','current-project')) { Set-VoiceTaskCreateNotice '无法确认新任务的位置，请重新说一次。';return $true }

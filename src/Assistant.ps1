@@ -14,7 +14,7 @@ Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System
 . (Join-Path $PSScriptRoot 'AudioBootstrap.ps1')
 foreach ($name in @('MicGuard.cs','JarvisRecorder.cs')) { Add-Type -Path (Join-Path $PSScriptRoot $name) }
 $workspace = Split-Path $PSScriptRoot -Parent
-foreach ($module in @('Version.ps1','Settings.ps1','PendingSends.ps1','WorkerLifecycle.ps1','CodexAdapter.ps1')) { . (Join-Path $PSScriptRoot $module) }
+foreach ($module in @('Version.ps1','Settings.ps1','PendingSends.ps1','WorkerLifecycle.ps1','CodexAdapter.ps1','DraftRecovery.ps1','BindingRecovery.ps1')) { . (Join-Path $PSScriptRoot $module) }
 $script:appVersion=Get-AssistantVersion -Root $workspace
 $stateDir = if ($TestMode) { if ($TestStateDir) { [IO.Path]::GetFullPath($TestStateDir) } else { Join-Path $workspace 'work\tests\app-state' } } elseif ($PreviewPath) { Join-Path $workspace 'work\preview' } else { Join-Path $workspace 'data' }
 if (-not $StatusPath -and -not $PreviewPath) { $StatusPath = Join-Path $stateDir 'status.json' }
@@ -101,6 +101,7 @@ $script:speechQueue = New-Object 'System.Collections.Generic.Queue[string]'
 . (Join-Path $PSScriptRoot 'HandsFree.ps1')
 . (Join-Path $PSScriptRoot 'WakePhrase.ps1')
 Initialize-AssistantSettings
+Initialize-BindingRecovery
 
 function Stop-Output([string]$Message = '', [switch]$PreserveVoiceBookmark) {
     if ($Message -and (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue)) { Close-ShortFollowUp -CancelCapture }
@@ -162,6 +163,11 @@ function Send-Text([string]$VoiceSource = '') {
     $text = $InputBox.Text.Trim()
     if (-not $text) { $script:notice = '先说一句话，或者在输入框里打字。'; return }
     if (Try-LocalAssistantCommand $text) { return }
+    if ($script:bindingAvailability -in @('archived','missing')) {
+        if (Save-InputDraftForRecovery '目标不可发送，普通输入未投递') { $script:notice='原任务不可发送，刚才的话已单独保留；请先切换任务。' }
+        return
+    }
+    if ($script:bindingAvailability -eq 'unknown') { $script:notice=$script:bindingAvailabilityError; return }
     if (Test-VoiceTaskCreateBlocksSend) { $script:notice='新任务尚未连接，文字已保留。请连接新任务或放弃连接。'; return }
     if (-not $script:connected) { $script:notice = '尚未连接任务，请在设置里选择并连接任务。'; return }
     if ($script:bindingReadError) { $script:notice='任务连接异常，文字已保留；请先切换或重新连接任务。'; return }
@@ -185,7 +191,7 @@ function Send-Text([string]$VoiceSource = '') {
     }
 }
 function Begin-Recording([bool]$FromWake = $false) {
-    if (-not $script:connected) { $script:notice = '先连接一个 Codex 任务。'; return }
+    if (-not $script:connected -and $script:bindingAvailability -notin @('archived','missing')) { $script:notice = '先连接一个 Codex 任务。'; return }
     if ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { $script:notice='正在等待发送回执，请稍等再开始录音。'; return }
     if ($script:recMode -ne 'idle' -or $script:asrJob) { return }
     $useEcho=($FromWake -and (Test-FullDuplexReady) -and $script:wakeListener.HasQuestion)
@@ -249,6 +255,7 @@ function Begin-Speech([string]$Text) {
     Start-AssistantSpeech $Text
 }
 function Apply-Thread($Result) {
+    if ($Result.archived -eq $true -or $Result.bindingState -in @('archived','missing')) { throw '目标任务已归档或不存在，请选择活动任务。' }
     if (-not $Result.rolloutPath -or -not (Test-Path -LiteralPath $Result.rolloutPath)) { throw '这个任务的本地记录暂时不可用，请先在 Codex 打开它。' }
     $path=if ($TestTranscriptPath) { $TestTranscriptPath } else { $Result.rolloutPath }
     $reuseTail=($script:connected -and $script:threadId -eq $Result.threadId -and $script:tail -and $script:tail.Path -eq $path)
@@ -268,6 +275,11 @@ function Apply-Thread($Result) {
     $script:lastUserVersion=$script:tail.UserTurnVersion
     $script:latest=$script:tail.Latest
     $script:connected=$true
+    $script:bindingGeneration++
+    $script:bindingAvailability='active'
+    $script:bindingAvailabilityError=''
+    $script:lastBindingProbe=[DateTime]::MinValue
+    if (-not $InputBox.Text.Trim()) { $script:recoveryDraftError='' }
     $script:bindingReadError=''
     $script:busy=($Result.status -eq 'active')
     $TaskLabel.Text=$Result.title
@@ -374,6 +386,7 @@ try {
     $timer.Add_Tick({
         try {
             $now=[DateTime]::UtcNow
+            if (Get-Command Update-BindingAvailability -ErrorAction SilentlyContinue) { Update-BindingAvailability $now }
             Update-ManualTaskBinding
             Update-VoiceTaskSwitch $now
             Update-VoiceTaskCreate -Now $now
@@ -390,7 +403,7 @@ try {
             # pipeline warms up; Safe-To-Play still gates synthesis/playback.
             $waitingForEchoStartup=($script:handsFreeEnabled -and $script:bargeInEnabled -and -not $TestMode -and
                 $script:recMode -eq 'idle' -and $script:speechQueue.Count -gt 0 -and -not $script:ttsJob -and
-                [CodexReader.AudioPlayer]::State -notin @('playing','paused') -and $script:connected -and
+                [CodexReader.AudioPlayer]::State -notin @('playing','paused') -and ($script:connected -or $script:bindingAvailability -in @('archived','missing')) -and
                 -not $script:pendingUncertain -and -not $script:autoDispatch -and -not $InputBox.Text.Trim() -and
                 $script:mic.Ready -and -not $script:mic.LastError -and -not (Test-ExternalCapture) -and
                 $script:wakeListener -and -not $script:wakeListener.Error -and
@@ -430,7 +443,12 @@ try {
                     $recognized=[string]$result.text
                     $InputBox.Text=if ($job.Prefix -and $recognized.Trim()) { $job.Prefix + [Environment]::NewLine + $recognized } elseif ($job.Prefix) { $job.Prefix } else { $recognized }
                     $script:notice=if ($InputBox.Text.Trim()) { '文字已识别，可以修改或发送。' } else { '没有听清内容，已回到待机。' }
-                    if ($job.FromFollowUp -and -not (Test-ShortFollowUpTranscript $recognized)) {
+                    if ($script:bindingAvailability -in @('archived','missing')) {
+                        # No ordinary speech can leave recovery mode. Commands
+                        # stay local; other text is saved under its original ID.
+                        Send-Text
+                        $script:submitAfterRecognition=$false
+                    } elseif ($job.FromFollowUp -and -not (Test-ShortFollowUpTranscript $recognized)) {
                         Close-ShortFollowUp $(if ($recognized.Trim()) { '内容不够明确，已保留草稿但不会自动发送。' } else { '没有听清内容，已回到唤醒待机。' })
                     } elseif ($job.SendAfter -and $recognized.Trim()) {
                         $source=if ($job.FromFollowUp) { 'follow-up' } elseif ($job.FromWake) { 'wake' } else { '' }
@@ -470,6 +488,10 @@ try {
                     if ($receiptState -eq 'accepted') {
                         $script:sent++
                         $currentReceipt=($job.Request.threadId -ceq $script:threadId -and
+                            $script:bindingAvailability -notin @('archived','missing') -and
+                            (-not $job.ContainsKey('BindingGeneration') -or $job.BindingGeneration -eq $script:bindingGeneration) -and
+                            (-not $job.ContainsKey('InputGeneration') -or $job.InputGeneration -eq $script:voiceGeneration) -and
+                            $InputBox.Text.Trim() -ceq $job.Request.text -and
                             (-not $job.VoiceSource -or ((Test-ShortFollowUpGeneration $job.FollowUpGeneration $job.Request.threadId) -and
                                 $job.VoiceGeneration -eq $script:voiceGeneration -and $InputBox.Text.Trim() -ceq $job.Request.text)))
                         if ($currentReceipt) {
@@ -519,6 +541,9 @@ try {
                 elseif ($script:pendingUncertain) { '发送状态待确认 · 请在 Codex 核对' }
                 elseif ($script:handsFreeEnabled -and (Test-WakeRecoveryPending)) { $script:wakeRecovery.Message }
                 elseif ($script:handsFreePhase -in @('releasing','answering-wake','acknowledging')) { '在 · 请说你的问题' }
+                elseif ($script:recoveryDraftError) { $script:recoveryDraftError }
+                elseif ($script:bindingAvailability -in @('archived','missing')) { '原任务已归档或不存在 · 普通发送已停用 · 可唤醒切换任务' }
+                elseif ($script:bindingAvailability -eq 'unknown') { $script:bindingAvailabilityError }
                 elseif ($script:handsFreeEnabled -and $InputBox.Text.Trim()) { '有未发送草稿 · 唤醒已暂停 · 请打开字幕处理' }
                 elseif ($script:bindingReadError) { '任务连接异常 · 普通消息暂停 · 可语音切换任务' }
                 elseif ($playbackState -eq 'paused') { if ($script:playbackNotice) { $script:playbackNotice } else { '已暂停朗读，点击继续可接着听。' } }
@@ -531,9 +556,9 @@ try {
                 elseif ($script:busy) { 'Codex 正在处理…' }
                 else { $script:notice }
             $SpeakButton.Content=if ($script:recMode -eq 'listening') { '结束录音' } elseif ($script:recMode -ne 'idle') { '请稍等…' } else { '开始说话' }
-            $SpeakButton.IsEnabled=($script:connected -and $script:recMode -in @('idle','listening') -and -not ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send'))
+            $SpeakButton.IsEnabled=(($script:connected -or $script:bindingAvailability -in @('archived','missing')) -and $script:recMode -in @('idle','listening') -and -not ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send'))
             $localReady=($script:recMode -eq 'idle' -and $null -ne (Get-AssistantVoiceCommand $InputBox.Text))
-            $SendButton.IsEnabled=($localReady -or ($script:connected -and -not $script:bindingReadError -and -not $script:bridgeJob -and $script:recMode -ne 'arming' -and -not $script:pendingUncertain))
+            $SendButton.IsEnabled=($localReady -or ($script:connected -and $script:bindingAvailability -notin @('archived','missing','unknown') -and -not $script:bindingReadError -and -not $script:bridgeJob -and $script:recMode -ne 'arming' -and -not $script:pendingUncertain))
             $StopButton.Content=if ($script:shortFollowUp -or $script:followUpCapture) { '结束接话' } elseif ($script:recMode -ne 'idle') { '取消录音' } else { '停止朗读' }
             $AnswerStateLabel.Text=if ($script:busy) { '处理中' } elseif ($playing) { '正在朗读' } else { '文字 · 语音' }
             $FooterHint.Text=if ($script:shortFollowUp -or $script:followUpCapture) { '连续接话有时限 · 可随时点“结束接话”' } elseif ($script:handsFreeEnabled -and $script:recMode -eq 'idle' -and $InputBox.Text.Trim()) { '草稿已保留 · 发送或自行清空后恢复唤醒；也可点击开始说话继续补充' } elseif ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
@@ -575,7 +600,12 @@ try {
             $statusData=@{version=7;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;shortFollowUpPhase=if($script:shortFollowUp){$script:shortFollowUp.Phase}else{'idle'};followUpCapture=$script:followUpCapture;echoReady=(Test-FullDuplexReady);echoQuestionCapture=$script:echoQuestionCapture;handsFreeEnabled=$script:handsFreeEnabled;handsFreePhase=$script:handsFreePhase;wakePhrase=$script:wakePhrase;wakeCount=$script:wakeCount;wakeListening=$script:wakeListener.IsListening;wakeReady=$script:wakeListener.IsReady;autoSendPrepared=$script:autoSendPrepared;connected=$script:connected;threadId=$script:threadId;recordingMode=$script:recMode;level=$script:level;status=$StatusLabel.Text;received=$script:received;spoken=$script:spoken;sent=$script:sent;busy=$script:busy;error=$script:errorText;micReady=$script:mic.Ready;micActive=$script:mic.AnyCaptureActive;topmost=$window.Topmost;windowVisible=$window.IsVisible;voice=$script:voiceId;autoSend=$script:autoSend;playerState=[CodexReader.AudioPlayer]::State;compact=(-not $script:captionsVisible);style=$script:waveStyle;waveSize=$script:waveSize;speechRate=$script:speechRate;autoRead=$script:autoRead;settingsVisible=$desktop.SettingsWindow.IsVisible;captionVisible=$desktop.CaptionWindow.IsVisible;pid=$PID}
             if ($TestMode) { $statusData.inputText=$InputBox.Text; $statusData.answerText=$AnswerBox.Text; $statusData.testCommand=$script:lastTestCommand; $statusData.taskCandidateCount=@($script:taskCandidates).Count; $statusData.selectedTaskId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' } }
             $statusData.localCommandCount=$script:localCommandCount
-            $statusData.bindingHealthy=($script:connected -and -not $script:bindingReadError)
+            $statusData.bindingHealthy=($script:connected -and $script:bindingAvailability -notin @('archived','missing','unknown') -and -not $script:bindingReadError)
+            $statusData.bindingAvailability=[string]$script:bindingAvailability
+            $statusData.recoveryDraftCount=[int]$script:recoveryDraftCount
+            $statusData.recoveryDraftError=[string]$script:recoveryDraftError
+            $statusData.selectedTaskId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' }
+            $statusData.selectionNeedsConnection=[bool]($TaskCombo.SelectedItem -and (-not $script:connected -or $TaskCombo.SelectedItem.threadId -cne $script:threadId))
             $statusData.bindingReadError=$script:bindingReadError
             $statusData.lastLocalCommand=$script:lastLocalCommand
             $statusData.localCommandMessage=$script:localCommandMessage
@@ -634,7 +664,7 @@ try {
             $script:lastStatusWrite=[DateTime]::UtcNow
         }
     })
-    $window.Add_Closed({ $script:closing=$true; Reset-ManualTaskBinding; Reset-VoiceTaskSwitch; Invalidate-VoiceTaskCreateBinding -Reason '声伴已关闭'; $script:voiceGeneration++; $script:autoDispatch=$null; Suspend-WakeListener; $timer.Stop(); Stop-Output; if ($script:recMode -ne 'idle') { Cancel-Recording }; if (-not $PreviewPath) { $window.Dispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background) } })
+    $window.Add_Closed({ $script:closing=$true; if (Get-Command Close-BindingProbe -ErrorAction SilentlyContinue) { Close-BindingProbe }; Reset-ManualTaskBinding; Reset-VoiceTaskSwitch; Invalidate-VoiceTaskCreateBinding -Reason '声伴已关闭'; $script:voiceGeneration++; $script:autoDispatch=$null; Suspend-WakeListener; $timer.Stop(); Stop-Output; if ($script:recMode -ne 'idle') { Cancel-Recording }; if (-not $PreviewPath) { $window.Dispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background) } })
     if ($PreviewPath) {
         $TaskLabel.Text='当前 Codex 任务'; $StatusLabel.Text='点击开始说话'; $window.Show(); $window.UpdateLayout()
         $render=New-Object Windows.Media.Imaging.RenderTargetBitmap([int]$window.ActualWidth,[int]$window.ActualHeight,96,96,[Windows.Media.PixelFormats]::Pbgra32)

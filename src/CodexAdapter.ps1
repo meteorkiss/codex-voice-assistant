@@ -23,7 +23,8 @@
         finally { Remove-OwnedFiles @($inputPath,$outputPath) }
         throw
     }
-    $script:bridgeJob=@{Process=$proc;Files=@($inputPath,$outputPath);Output=$outputPath;Purpose=$Purpose;Request=$Request;Started=[DateTime]::UtcNow}
+    $script:bridgeJob=@{Process=$proc;Files=@($inputPath,$outputPath);Output=$outputPath;Purpose=$Purpose;Request=$Request;Started=[DateTime]::UtcNow;
+        BindingGeneration=$script:bindingGeneration;InputGeneration=$script:voiceGeneration}
     if ($Purpose -eq 'send') {
         $pending=@{}; foreach ($key in $script:pendingSends[$Request.threadId].Keys) { $pending[$key]=$script:pendingSends[$Request.threadId][$key] }
         try {

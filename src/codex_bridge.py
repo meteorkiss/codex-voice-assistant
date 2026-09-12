@@ -30,6 +30,8 @@ PIPE_PREFIX = '\\\\.\\pipe\\'
 PIPE_NAME = re.compile(r'codex-browser-use-[0-9a-fA-F-]{36}')
 MAX_FRAME = 8 * 1024 * 1024
 INDEX_NAME = re.compile(r'state_(\d+)\.sqlite')
+INDEX_REQUIRED = {'id', 'title', 'cwd', 'rollout_path', 'archived', 'source', 'updated_at'}
+INDEX_OPTIONAL = {'agent_path', 'thread_source', 'parent_thread_id', 'host_id', 'hostId', 'kind'}
 
 
 class BridgeError(Exception):
@@ -199,6 +201,71 @@ def local_index_path(root):
     return max(indexes, key=lambda item: item[0])[1]
 
 
+def index_columns(db):
+    columns = {row[1] for row in db.execute('PRAGMA table_info(threads)')}
+    if not INDEX_REQUIRED <= columns:
+        raise BridgeError('unsupported_index_schema',
+                          '当前 Codex 任务索引结构不受支持，请更新助手；不会使用旧索引或默认任务。')
+    return sorted(INDEX_REQUIRED | (INDEX_OPTIONAL & columns))
+
+
+def local_main_index_record(item):
+    """Use the same metadata-only identity boundary for lookup and binding."""
+    return (item['source'] in ('cli', 'vscode', 'exec', 'app-server', 'appServer', 'app_server') and
+            not item.get('agent_path') and not item.get('parent_thread_id') and
+            item.get('thread_source') not in ('subagent', 'remote', 'cloud', 'chatgpt') and
+            item.get('kind', 'codex') == 'codex' and
+            item.get('host_id', item.get('hostId', 'local')) == 'local')
+
+
+def binding_state(thread_id):
+    """Read one explicit local task's archive flag, without pipe or transcript.
+
+    Missing means the latest supported index contains no such ID. A moved or
+    absent rollout does not establish archival, and unreadable indexes are
+    errors rather than a guessed state. mode=ro includes recent WAL commits.
+    """
+    thread_id = valid_thread(thread_id)
+    index = local_index_path(codex_home())
+    try:
+        with sqlite3.connect(index.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
+            db.execute('PRAGMA query_only=ON')
+            selected = index_columns(db)
+            db.row_factory = sqlite3.Row
+            records = db.execute('SELECT ' + ','.join('"' + name + '"' for name in selected) +
+                                 ' FROM threads WHERE id=? COLLATE NOCASE LIMIT 2',
+                                 (thread_id,)).fetchall()
+            if not records:
+                return {'threadId': thread_id, 'state': 'missing', 'archived': False}
+            if len(records) != 1:
+                raise BridgeError('unsupported_index_schema', '本机任务索引含有重复编号，无法确认连接状态。')
+            item = dict(records[0])
+            if not local_main_index_record(item) or normalized_local_path(item['cwd']) is None:
+                raise BridgeError('wrong_target', '目标必须是本机 Codex 主任务。')
+            if type(item['archived']) is not int or item['archived'] not in (0, 1):
+                raise BridgeError('index_unavailable', '本机任务索引未提供明确的归档状态，暂不允许发送。')
+            archived = item['archived'] == 1
+            return {'threadId': thread_id, 'state': 'archived' if archived else 'active',
+                    'archived': archived}
+    except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
+        raise BridgeError('index_unavailable', f'无法只读确认本机任务状态：{exc}') from exc
+    finally:
+        if 'db' in locals():
+            db.close()
+
+
+def require_active_binding(thread_id):
+    try:
+        state = binding_state(thread_id)
+    except BridgeError as exc:
+        raise BridgeError('task_unavailable', '暂时无法确认目标任务可发送；草稿保留，请重新选择或稍后检测。') from exc
+    if state['state'] == 'archived':
+        raise BridgeError('task_archived', '目标任务已归档，未发送；请先在 Codex 恢复任务或明确切换到其它对话。')
+    if state['state'] != 'active':
+        raise BridgeError('task_unavailable', '目标任务已不存在，未发送；请明确选择其它对话。')
+    return state
+
+
 def display_title_index(root):
     """Read Codex's append-only display-name index, without conversation reads.
 
@@ -248,33 +315,21 @@ def list_tasks(cwd=None):
     directory_filter = normalized_local_path(cwd) if cwd is not None else None
     if cwd is not None and directory_filter is None:
         raise BridgeError('invalid_directory_filter', '目录筛选必须是本机的绝对路径。')
-    required = {'id', 'title', 'cwd', 'rollout_path', 'archived', 'source', 'updated_at'}
-    optional = {'agent_path', 'thread_source', 'parent_thread_id', 'host_id', 'hostId', 'kind'}
     rows = []
     try:
         # mode=ro participates in the current WAL; immutable=1 can return stale rows.
         with sqlite3.connect(index.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
             db.execute('PRAGMA query_only=ON')
-            columns = {row[1] for row in db.execute('PRAGMA table_info(threads)')}
-            if not required <= columns:
-                raise BridgeError('unsupported_index_schema',
-                                  '当前 Codex 任务索引结构不受支持，请更新助手；不会使用旧索引或默认任务。')
-            selected = sorted(required | (optional & columns))
+            selected = index_columns(db)
             db.row_factory = sqlite3.Row
             cursor = db.execute('SELECT ' + ','.join('"' + name + '"' for name in selected) +
                                 ' FROM threads WHERE archived=0 ORDER BY updated_at DESC, id ASC')
             sessions = (root / 'sessions').resolve()
             for record in cursor:
                 item = dict(record)
-                source = item['source']
                 # Object-valued sources describe spawned agents or an unknown
                 # source; only known local session producers are candidates.
-                if source not in ('cli', 'vscode', 'exec', 'app-server', 'appServer', 'app_server'):
-                    continue
-                if (item.get('agent_path') or item.get('parent_thread_id') or
-                        item.get('thread_source') in ('subagent', 'remote', 'cloud', 'chatgpt') or
-                        item.get('kind', 'codex') != 'codex' or
-                        item.get('host_id', item.get('hostId', 'local')) != 'local'):
+                if not local_main_index_record(item):
                     continue
                 try:
                     thread_id = valid_thread(item['id'])
@@ -354,6 +409,9 @@ def read_task(pipe, thread_id):
         raise BridgeError('wrong_target', 'Codex 未返回可校验的任务信息，请重新选择任务。')
     if thread.get('id') != thread_id or thread.get('kind') != 'codex' or thread.get('hostId') != 'local':
         raise BridgeError('wrong_target', '目标必须是已存在的本地 Codex 任务。')
+    state = binding_state(thread_id)
+    if state['state'] == 'missing':
+        raise BridgeError('task_unavailable', '本机任务索引中未找到这个任务，请重新选择。')
     path = rollout_path(thread_id)
     if is_subagent(path):
         raise BridgeError('subagent_target', '请选择主任务；子智能体不是语音对话的发送目标。')
@@ -367,12 +425,13 @@ def read_task(pipe, thread_id):
                                'truncated': bool(item.get('textTruncated') or item.get('truncated'))})
     return {'threadId': thread_id, 'title': thread.get('title', ''), 'cwd': thread.get('cwd'),
             'hostId': 'local', 'status': normalized_status(thread.get('status')), 'rolloutPath': path,
+            'archived': state['archived'], 'bindingState': state['state'],
             'lastAssistantText': finals[0]['text'] if finals else '',
             'lastAssistantTextTruncated': finals[0]['truncated'] if finals else False,
             'finalMessages': finals, 'activeThreadDetection': 'explicit_binding'}
 
 
-def send_once(pipe, thread_id, text, request_id, state_dir):
+def send_identity(thread_id, text, request_id):
     thread_id = valid_thread(thread_id)
     if not isinstance(text, str) or not text.strip():
         raise BridgeError('empty_message', '没有可以发送的文字。')
@@ -380,9 +439,46 @@ def send_once(pipe, thread_id, text, request_id, state_dir):
         request_id = str(uuid.UUID(str(request_id)))
     except (ValueError, AttributeError, TypeError):
         raise BridgeError('request_id_required', '发送请求必须带有唯一 requestId（UUID）。')
+    digest = hashlib.sha256((thread_id + '\0' + text).encode('utf-8')).hexdigest()
+    return thread_id, request_id, digest
+
+
+def prior_send_result(prior, digest):
+    if prior[0] != digest:
+        raise BridgeError('request_id_conflict', '同一 requestId 不能用于不同内容。')
+    if prior[1] == 'accepted':
+        return {**json.loads(prior[2]), 'duplicateSuppressed': True}
+    raise BridgeError('duplicate_suppressed', '这条发送请求已经处理或结果未确认，已阻止重复发送。请先检查 Codex。',
+                      prior[1] in ['pending', 'unknown'])
+
+
+def existing_send_result(thread_id, text, request_id, state_dir):
+    """Preserve a stored unknown outcome before new target-state rejections.
+
+    This read-only preflight never creates a ledger or replays a request. The
+    transactional guard in send_once still handles concurrent/new submissions.
+    """
+    thread_id, request_id, digest = send_identity(thread_id, text, request_id)
+    path = Path(state_dir).resolve() / 'send-ledger.sqlite3'
+    try:
+        if not path.is_file():
+            return None
+        with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
+            db.execute('PRAGMA query_only=ON')
+            prior = db.execute('SELECT digest,state,result FROM sends WHERE request_id=?',
+                               (request_id,)).fetchone()
+            return prior_send_result(prior, digest) if prior else None
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        raise BridgeError('send_ledger_unavailable', '无法确认已有发送记录，请先核对 Codex；不会重复发送。', True) from exc
+    finally:
+        if 'db' in locals():
+            db.close()
+
+
+def send_once(pipe, thread_id, text, request_id, state_dir):
+    thread_id, request_id, digest = send_identity(thread_id, text, request_id)
     state_dir = Path(state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256((thread_id + '\0' + text).encode('utf-8')).hexdigest()
     db = sqlite3.connect(state_dir / 'send-ledger.sqlite3', timeout=5)
     db.execute('CREATE TABLE IF NOT EXISTS sends (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, state TEXT NOT NULL, result TEXT, created REAL NOT NULL)')
     db.commit()
@@ -390,14 +486,14 @@ def send_once(pipe, thread_id, text, request_id, state_dir):
     prior = db.execute('SELECT digest,state,result FROM sends WHERE request_id=?', (request_id,)).fetchone()
     if prior:
         db.rollback(); db.close()
-        if prior[0] != digest:
-            raise BridgeError('request_id_conflict', '同一 requestId 不能用于不同内容。')
-        if prior[1] == 'accepted':
-            return {**json.loads(prior[2]), 'duplicateSuppressed': True}
-        raise BridgeError('duplicate_suppressed', '这条发送请求已经处理或结果未确认，已阻止重复发送。请先检查 Codex。', prior[1] in ['pending', 'unknown'])
+        return prior_send_result(prior, digest)
     db.execute('INSERT INTO sends VALUES (?,?,?,?,?)', (request_id, digest, 'pending', None, time.time()))
     db.commit()
     try:
+        # The ledger may have waited for another writer after handle's check.
+        # Validate again at the actual dispatch boundary; an old ledger result
+        # was already handled above and cannot be relabeled or replayed here.
+        require_active_binding(thread_id)
         result = app_tool(pipe, 'send_message_to_thread',
                           {'threadId': thread_id, 'hostId': 'local', 'prompt': text},
                           thread_id, request_id=request_id, mutation=True)
@@ -433,8 +529,8 @@ def handle(request):
     if not isinstance(request, dict):
         raise BridgeError('invalid_request', '请求必须是 JSON 对象。')
     action = request.get('action')
-    if action not in ['read', 'list', 'find', 'send', 'open', 'create', 'create-status', 'manage']:
-        raise BridgeError('invalid_action', 'action 必须为 read、list、find、send、open、create、create-status 或 manage。')
+    if action not in ['read', 'list', 'find', 'binding-state', 'send', 'open', 'create', 'create-status', 'manage']:
+        raise BridgeError('invalid_action', 'action 必须为 read、list、find、binding-state、send、open、create、create-status 或 manage。')
     if action == 'list':
         return list_tasks(request.get('cwd'))
     if action == 'find':
@@ -449,6 +545,8 @@ def handle(request):
         except TaskMatchError as exc:
             raise BridgeError(exc.code, str(exc)) from exc
     thread_id = valid_thread(request.get('threadId'))
+    if action == 'binding-state':
+        return binding_state(thread_id)
     if action == 'manage':
         return manage_once(thread_id, request.get('requestId'), request.get('command'),
                            request.get('stateDir') or Path(__file__).resolve().parents[1] / 'data',
@@ -477,6 +575,12 @@ def handle(request):
 
         return create_once(thread_id, request.get('requestId'), request.get('scope', 'projectless'),
                            request.get('title'), state_dir, prepare_creation, dispatch_creation, BridgeError)
+    state_dir = request.get('stateDir') or Path(__file__).resolve().parents[1] / 'data'
+    if action == 'send':
+        prior = existing_send_result(thread_id, request.get('text'), request.get('requestId'), state_dir)
+        if prior is not None:
+            return prior
+        require_active_binding(thread_id)
     pipe = discover_pipe(request.get('pipePath'))
     if action == 'read':
         return read_task(pipe, thread_id)
@@ -485,8 +589,11 @@ def handle(request):
     if action == 'open':
         result = app_tool(pipe, 'navigate_to_codex_page', {'threadId': thread_id}, thread_id)
         return {'threadId': thread_id, 'opened': True, 'result': result}
+    # Recheck after the live read, immediately before dispatch. Reading an
+    # archived task is permitted for recovery, but sending must never restore it.
+    require_active_binding(thread_id)
     return send_once(pipe, thread_id, request.get('text'), request.get('requestId'),
-                     request.get('stateDir') or Path(__file__).resolve().parents[1] / 'data')
+                     state_dir)
 
 
 def main():

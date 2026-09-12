@@ -18,6 +18,7 @@ function Import-Function([string]$File,[string]$Name) {
     return [scriptblock]::Create($node.Extent.Text)
 }
 . (Import-Function 'src\Assistant.ps1' 'Stop-Output')
+. (Join-Path $Root 'src\AudioOutput.ps1')
 . (Import-Function 'src\Assistant.ps1' 'Cancel-Recording')
 . (Import-Function 'src\HandsFree.ps1' 'Test-ExternalCapture')
 . (Join-Path $Root 'src\WakeRecovery.ps1')
@@ -46,7 +47,7 @@ function Reset-Case {
     $script:closed=@();$script:removed=@();$script:epoch=0;$script:audioPath='';$script:ttsJob=$null
     $script:speechQueue=New-Object 'System.Collections.Generic.Queue[string]'
     $script:voiceGeneration=10L;$script:autoDispatch=$null;$script:asrJob=$null;$script:submitAfterRecognition=$false
-    $script:bridgeJob=$null;$script:pendingUncertain=$false;$script:connected=$true;$script:closing=$false;$script:recMode='idle'
+    $script:bridgeJob=$null;$script:pendingUncertain=$false;$script:connected=$true;$script:closing=$false;$script:recMode='idle';$script:bindingAvailability='active'
     $script:handsFreeEnabled=$true;$script:bargeInEnabled=$true;$script:handsFreePhase='listening';$script:handsFreeCapture=$false;$script:echoQuestionCapture=$false
     $script:wakeOwnsMicrophone=$true;$script:lastWakeVersion=0L;$script:lastMicVersion=0L;$script:wakePhrase='你好，声伴';$script:TestMode=$false
     $script:notice='';$script:errorText='';$script:recordPath='';$script:recordPrefix=''
@@ -205,6 +206,20 @@ Case 'Turning wake off clears recovery only after physical release and a fresh s
     Assert (-not (Test-ExternalCapture)) 'Released disabled recovery still blocked manual-mode playback.'
 }
 
+foreach ($recoveryState in @('archived','missing')) {
+    Case ('Local-only '+$recoveryState+' context can rebuild listening without enabling sends') {
+        $script:connected=$false;$script:bindingAvailability=$recoveryState
+        Start-Once
+        Health 'healthy';Tick
+        Assert ($script:wakeRecovery.Phase -eq 'idle' -and $script:handsFreePhase -eq 'listening') 'Local-only recovery remained blocked.'
+        Assert (-not $script:connected) 'Microphone recovery enabled an invalid send destination.'
+    }
+}
+Case 'Unknown disconnected context cannot invent permission to reopen capture' {
+    $script:connected=$false;$script:bindingAvailability='unknown'
+    Fault;Released;Tick;Tick 3
+    Assert ($script:wakeListener.Starts -eq 0) 'Unknown disconnected context reopened the microphone.'
+}
 $result=@{passed=@($script:cases|Where-Object{$_.passed}).Count;failed=@($script:cases|Where-Object{-not $_.passed}).Count;checks=$script:checks;cases=$script:cases;powershell=$PSVersionTable.PSVersion.ToString();boundaries='Real WakeRecovery plus production cancellation/external-capture functions; injected clock, listener health, endpoint routes, sessions, processes and audio. No devices, playback, live worker control or Codex operations.'}
 $output=Join-Path $Root 'work\tests\wake-recovery';[void][IO.Directory]::CreateDirectory($output)
 [IO.File]::WriteAllText((Join-Path $output 'result.json'),($result|ConvertTo-Json -Depth 6),(New-Object Text.UTF8Encoding($false)))

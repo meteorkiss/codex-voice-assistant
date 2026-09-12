@@ -196,6 +196,16 @@ function Update-DesktopDisplay {
     }
     if ($desktop.Controls.ContainsKey('MenuFollowUpEnd')) { $desktop.Controls.MenuFollowUpEnd.IsEnabled=[bool]($script:shortFollowUp -or $script:followUpCapture) }
     $BindTaskButton.IsEnabled=($null -ne $TaskCombo.SelectedItem -and -not $script:bridgeJob -and $script:recMode -eq 'idle')
+    if ($desktop.Controls.ContainsKey('TaskSelectionHint')) {
+        $desktop.Controls.TaskSelectionHint.Text=if ($TaskCombo.SelectedItem -and (-not $script:connected -or $TaskCombo.SelectedItem.threadId -cne $script:threadId)) { '已选中但尚未连接。请点击“连接所选任务”；旧草稿会单独保存。' } elseif ($script:connected) { '已连接到当前所选任务；后续消息发往这里。' } else { '先选择任务，再点击连接。' }
+    }
+    if ($desktop.Controls.ContainsKey('BindingAvailabilityLabel')) {
+        $desktop.Controls.BindingAvailabilityLabel.Text=if ($script:bindingAvailability -eq 'archived') { '原任务已归档，普通发送已停用；可唤醒后说切换任务。' } elseif ($script:bindingAvailability -eq 'missing') { '原任务不存在，请重新选择；不会自动连接其它任务。' } elseif ($script:bindingAvailability -eq 'unknown') { $script:bindingAvailabilityError } elseif ($script:connected) { '连接有效' } else { '尚未建立可发送的连接' }
+    }
+    if ($desktop.Controls.ContainsKey('RecoveryDraftButton')) {
+        $desktop.Controls.RecoveryDraftButton.IsEnabled=($script:recoveryDraftCount -gt 0)
+        $desktop.Controls.RecoveryDraftButton.Content='查看保留草稿（'+[int]$script:recoveryDraftCount+'）'
+    }
     $RefreshTasksButton.IsEnabled=(-not $script:bridgeJob)
     $OpenTaskButton.IsEnabled=($script:connected -and -not $script:bridgeJob)
 }
@@ -276,6 +286,7 @@ function Initialize-DesktopController {
     $ResetPositionButton.Add_Click({ Reset-DesktopShellPosition $desktop; Save-Settings })
     $MenuPin.Add_Click({ [void](Invoke-DesktopPreference @{pinned=(-not $script:pinned)}) })
     $MenuSettings.Add_Click({ Show-AssistantSettings })
+    if ($desktop.Controls.ContainsKey('RecoveryDraftButton')) { $desktop.Controls.RecoveryDraftButton.Add_Click({ Open-AssistantRecoveryDraft }) }
     if ($desktop.Controls.ContainsKey('MenuPauseResume')) { $desktop.Controls.MenuPauseResume.Add_Click({ Toggle-AnswerPlayback }) }
     if ($desktop.Controls.ContainsKey('PauseResumeButton')) { $desktop.Controls.PauseResumeButton.Add_Click({ Toggle-AnswerPlayback }) }
     if ($desktop.Controls.ContainsKey('CenterPlaybackButton')) { $desktop.Controls.CenterPlaybackButton.Add_Click({ Invoke-CenterPlayback }) }

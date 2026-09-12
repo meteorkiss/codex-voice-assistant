@@ -65,9 +65,12 @@
               <TextBlock Text="目标对话 · 你的话会发到这里" Margin="0,13,0,8"/><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><ComboBox Name="TaskCombo" IsEditable="True" IsReadOnly="True" IsTextSearchEnabled="True" AutomationProperties.Name="目标 Codex 任务"/><Button Name="RefreshTasksButton" Grid.Column="1" Content="刷新" Margin="8,0,0,0"/></Grid>
               <TextBlock Text="显示对话名称。可说“切到声伴 6.17”或“切到高斯泼溅”；匹配多个时再选择。" Style="{StaticResource Note}" Margin="0,8,0,0"/>
               <Button Name="BindTaskButton" Content="连接所选任务" HorizontalAlignment="Right" Background="#007AFF" Foreground="White" BorderBrush="#0072EC" Margin="0,12,0,10"/>
+              <TextBlock Name="TaskSelectionHint" Text="选择后还需点击连接；旧草稿会单独保存，不会带到新任务。" Style="{StaticResource Note}" Margin="0,0,0,8"/>
             </StackPanel></Border>
             <TextBlock Text="当前连接" Style="{StaticResource SectionLabel}" Margin="2,23,0,8"/>
+            <TextBlock Name="BindingAvailabilityLabel" Style="{StaticResource Note}" Margin="2,0,0,8"/>
             <Border Style="{StaticResource SettingsGroup}"><StackPanel><TextBlock Name="TaskLabel" Text="尚未选择任务" Margin="0,10,0,5" TextWrapping="Wrap"/><TextBlock Name="BoundDirectoryLabel" Style="{StaticResource Note}" Margin="0,0,0,12"/><Border Style="{StaticResource Divider}"/><Button Name="OpenTaskButton" Content="在 Codex 中打开" HorizontalAlignment="Right" Margin="0,10,0,7"/></StackPanel></Border>
+            <Button Name="RecoveryDraftButton" Content="查看保留草稿" HorizontalAlignment="Right" Margin="0,12,0,0" ToolTip="打开保留草稿文件夹；不会自动恢复或发送。"/>
           </StackPanel>
         </ScrollViewer>
         <ScrollViewer Name="SoundPage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,3,0">

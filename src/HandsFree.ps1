@@ -206,7 +206,7 @@ function Set-HandsFree([bool]$Enabled) {
 }
 
 function Invoke-WakeActivation {
-    if (-not $script:handsFreeEnabled -or -not $script:connected -or $script:closing -or
+    if (-not $script:handsFreeEnabled -or (-not $script:connected -and $script:bindingAvailability -notin @('archived','missing')) -or $script:closing -or
         $script:recMode -ne 'idle' -or ($script:bridgeJob -and $script:bridgeJob.Purpose -notin @('list','open')) -or $script:pendingUncertain -or
         $InputBox.Text.Trim()) { return }
     $duplex=Test-FullDuplexReady
@@ -328,7 +328,7 @@ function Update-HandsFree([DateTime]$Now = [DateTime]::UtcNow) {
         $script:handsFreePhase=if ($script:recMode -eq 'transcribing') { 'recognizing' } else { 'recording' }
         return
     }
-    if (($script:bridgeJob -and $script:bridgeJob.Purpose -notin @('list','open')) -or $script:pendingUncertain -or $script:autoDispatch -or -not $script:connected -or $InputBox.Text.Trim()) {
+    if (($script:bridgeJob -and $script:bridgeJob.Purpose -notin @('list','open')) -or $script:pendingUncertain -or $script:autoDispatch -or (-not $script:connected -and $script:bindingAvailability -notin @('archived','missing')) -or $InputBox.Text.Trim()) {
         Suspend-WakeListener
         $script:handsFreePhase='waiting'
         return
