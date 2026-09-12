@@ -86,6 +86,89 @@ class TitleMatchingTests(unittest.TestCase):
         self.assertEqual((out['matchType'], out['totalMatches']), ('ambiguous', 2))
         self.assertEqual(out['threads'], rows)
 
+    def test_bare_version_fragment_supports_only_complete_or_zero_major_version(self):
+        for title in ('声伴 v0.6.17 · 短时连续接话', '声伴 V6.17', '声伴 6.17', '声伴 0.6.17'):
+            with self.subTest(title=title):
+                expected = task(title)
+                out = matcher.match_tasks('6.17', [expected])
+                self.assertEqual(out['matchType'], 'unique')
+                self.assertEqual(out['threads'], [expected])
+                self.assertIs(out['threads'][0], expected)
+
+    def test_bare_version_fragment_never_matches_other_numeric_boundaries(self):
+        for query in ('6.17', '声伴 6.17', '6.17 声伴', '声伴6.17'):
+            for version in ('6.170', '16.17', '6.17.1', '0.6.170', '0.6.17.1',
+                            '1.6.17', '10.6.17', '06.17', '0.06.17'):
+                with self.subTest(query=query, version=version):
+                    self.assertEqual(matcher.match_tasks(
+                        query, [task('声伴 v' + version)])['matchType'], 'none')
+
+    def test_dots_and_explicit_major_versions_are_not_guessed(self):
+        expected = task('声伴 v0.6.17 · 短时连续接话')
+        for query in ('617', '声伴 617', '声伴 V6.17', '声伴 00.6.17', '声伴 V0.617'):
+            with self.subTest(query=query):
+                self.assertEqual(matcher.match_tasks(query, [expected])['matchType'], 'none')
+
+    def test_name_and_bare_version_are_combined_without_rewriting_the_title(self):
+        expected = task('声伴 v0.6.17 · 短时连续接话')
+        rows = [task('其它 v0.6.17'), task('声伴 v0.6.16'), expected]
+        for query in ('声伴 6.17', '6.17 声伴', '声伴6.17', '声伴 ６．１７'):
+            with self.subTest(query=query):
+                out = matcher.match_tasks(query, rows)
+                self.assertEqual((out['matchType'], out['matchMethod']), ('unique', 'keywords'))
+                self.assertEqual(out['query'], query)
+                self.assertEqual(out['threads'], [expected])
+                self.assertEqual(out['threads'][0]['title'], '声伴 v0.6.17 · 短时连续接话')
+
+    def test_explicit_keyword_intersection_supports_nonadjacent_terms_in_any_order(self):
+        expected = task('高斯泼溅 · 场景制作 · 性能优化')
+        rows = [task('高斯泼溅 · 示例'), task('声伴 · 性能优化'), expected]
+        for query in ('高斯泼溅 性能优化', '性能优化 高斯泼溅', '高斯泼溅 场景 性能'):
+            with self.subTest(query=query):
+                out = matcher.match_tasks(query, rows)
+                self.assertEqual((out['matchType'], out['matchMethod']), ('unique', 'keywords'))
+                self.assertEqual(out['threads'], [expected])
+
+    def test_keyword_intersection_never_drops_an_unmatched_word(self):
+        expected = task('高斯泼溅 · 性能优化')
+        for query in ('高斯泼溅 其它', '帮我找 高斯泼溅', '高斯泼溅 性能优化 不存在'):
+            with self.subTest(query=query):
+                self.assertEqual(matcher.match_tasks(query, [expected])['matchType'], 'none')
+
+    def test_literal_full_title_and_contiguous_matches_still_take_precedence(self):
+        other = task('高斯泼溅 · 场景制作 · 性能优化')
+        for title, method in (('高斯泼溅性能优化', 'exact'), ('高斯泼溅性能优化测试', 'contains')):
+            with self.subTest(title=title):
+                expected = task(title)
+                out = matcher.match_tasks('高斯泼溅 性能优化', [other, expected])
+                self.assertEqual((out['matchType'], out['matchMethod']), ('unique', method))
+                self.assertEqual(out['threads'], [expected])
+
+    def test_same_bare_version_matches_all_candidates_and_preserves_cap(self):
+        rows = [task(f'声伴 v0.6.17 · 方案 {number}') for number in range(8)]
+        for query in ('6.17', '声伴 6.17', '声伴'):
+            with self.subTest(query=query):
+                out = matcher.match_tasks(query, rows)
+                self.assertEqual((out['matchType'], out['totalMatches']), ('ambiguous', 8))
+                self.assertEqual(out['threads'], rows[:5])
+
+    def test_multiple_explicit_versions_must_all_match(self):
+        expected = task('声伴 v0.6.17 与 v0.6.18 · 对比')
+        out = matcher.match_tasks('声伴 6.17 6.18',
+                                  [task('声伴 v0.6.17 · 单版'), expected])
+        self.assertEqual((out['matchType'], out['matchMethod']), ('unique', 'keywords'))
+        self.assertEqual(out['threads'], [expected])
+
+    def test_keyword_intersection_does_not_add_short_phonetic_guessing(self):
+        self.assertEqual(matcher.match_tasks(
+            '高思 6.17', [task('高斯 v0.6.17')])['matchType'], 'none')
+
+    def test_literal_keyword_matching_does_not_require_pinyin(self):
+        expected = task('声伴 v0.6.17 · 短时连续接话')
+        with patch.object(matcher, 'phonetic_units', side_effect=AssertionError('not needed')):
+            out = matcher.match_tasks('声伴 6.17', [expected])
+        self.assertEqual(out['threads'], [expected])
+
     def test_syllables_do_not_merge_across_character_boundaries(self):
         self.assertEqual(matcher.match_tasks('西安设', [task('先设计工具')])['matchType'], 'none')
 

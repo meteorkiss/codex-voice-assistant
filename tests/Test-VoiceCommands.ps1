@@ -84,6 +84,27 @@ foreach($entry in @(
  @('你帮我直接切刀刀锋  实验','刀锋  实验'),
  @('切换到高斯泼溅','高斯泼溅')
 )) { Assert-Command $entry[0] 'switchTask' $entry[1] }
+# Bare keywords are task lookup inputs, including a version without a v prefix.
+# Full-width digits, spaces and the observed verb homophone must remain exact
+# in the returned query; this parser never rewrites the original ASR string.
+foreach($entry in @(
+ @('切到6.17','6.17'),@('切到声伴 6.17','声伴 6.17'),
+ @('切刀声伴6.17','声伴6.17'),@('切到6.17 声伴','6.17 声伴'),
+ @('声伴，请帮我切到声伴 6 . 17 吧，谢谢。','声伴 6 . 17'),
+ @('切换到声伴 ６．１７','声伴 ６．１７'),@('切刀６．１７','６．１７'),
+ @('切到高斯泼溅','高斯泼溅'),@('帮我切刀高斯泼溅','高斯泼溅'),
+ @('切到高斯泼溅 性能优化','高斯泼溅 性能优化')
+)) { Assert-Command $entry[0] 'switchTask' $entry[1] }
+foreach($text in @(
+ '不要切到6.17','别切刀声伴6.17','帮我不要切到声伴 6.17',
+ '切到6.17吗','切到声伴 6.17？','怎么切到6.17','能否切到6.17',
+ '“切到6.17”','我说的是切到6.17','切到6.17是什么意思',
+ '切到6.17然后显示字幕','切到声伴 6.17并打开设置',
+ '切刀声伴6.17再帮我查天气','切到6.17。显示字幕','切到6.17.显示字幕',
+ '切到声伴。6.17','切到声伴.6.17','切到6..17','切到声伴６．．１７',
+ '切到高斯泼溅，打开设置','切到高斯泼溅只是测试'
+)) { Assert-Routed $text }
+Assert-Routed "切到6.17`n显示字幕"
 foreach($text in @(
  '不要帮我切换刀声伴V0.6.17任务','帮我不要切换刀声伴V0.6.17任务',
  '“帮我切换刀声伴V0.6.17任务”','我说的是帮我切换刀声伴V0.6.17任务',

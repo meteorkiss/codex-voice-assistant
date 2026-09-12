@@ -16,7 +16,11 @@ function Get-AssistantVoiceCommand {
     if ($candidate -match '[?？:：;；“”‘’「」『』《》〈〉"`''\\/\[\]{}<>=|#]') { return $null }
     if ($candidate -match '[\x00-\x08\x0b\x0c\x0e-\x1f]') { return $null }
     $candidate = [regex]::Replace($candidate, '[\s。.!！]+\z', '')
-    if ($candidate -match '[。.!！]') { return $null }
+    # Keep numeric keyword separators for the final task lookup. This only
+    # relaxes the sentence check; settings still run before bare title lookup,
+    # and that lookup receives the original ASR text rather than this copy.
+    $sentenceCheck = [regex]::Replace($candidate, '(?<=[0-9])\s*\.\s*(?=[0-9])', '')
+    if ($sentenceCheck -match '[。.!！]') { return $null }
     $candidate = [regex]::Replace($candidate, '[\s,，、]', '')
     if ($candidate -match '(?:不要|不用|别|不想|不需要|不能|不可以|不许|不准|是否|能否|怎么|如何|什么|为什么|可不可以|能不能)') { return $null }
 

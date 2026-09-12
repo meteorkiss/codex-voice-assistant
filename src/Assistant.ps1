@@ -465,7 +465,7 @@ try {
                 } elseif (-not $result -or -not $result.ok) {
                     if ($job.VoiceSource -and (Test-ShortFollowUpGeneration $job.FollowUpGeneration $job.Request.threadId)) { Close-ShortFollowUp }
                     $script:notice=if ($script:pendingUncertain) { '发送状态待确认，请先在 Codex 查看，核对后可在托盘解除。' } elseif ($result.error.message) { 'Codex 连接失败：' + [string]$result.error.message } else { '无法连接 Codex，请确认它正在运行。' }
-                } elseif ($purpose -eq 'list') { Set-TaskCandidates $result.threads }
+                } elseif ($purpose -eq 'list') { Set-TaskCandidates $result.threads ([string]$result.warning) }
                 elseif ($purpose -eq 'send') {
                     if ($receiptState -eq 'accepted') {
                         $script:sent++

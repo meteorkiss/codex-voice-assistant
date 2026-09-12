@@ -101,7 +101,7 @@ function Refresh-AssistantTasks {
     Reset-VoiceTaskSwitch
     if (Start-Bridge @{action='list'} 'list') { $script:notice='正在读取本机 Codex 任务…' }
 }
-function Set-TaskCandidates($Threads) {
+function Set-TaskCandidates($Threads, [string]$Warning='') {
     $script:taskCandidates=@($Threads)
     $script:tasksLoaded=$true
     $script:syncingUi=$true
@@ -115,7 +115,7 @@ function Set-TaskCandidates($Threads) {
         foreach ($entry in $DirectoryCombo.Items) { if ($entry.path -eq $script:directoryFilter) { $DirectoryCombo.SelectedItem=$entry; break } }
     } finally { $script:syncingUi=$false }
     Update-TaskSelection
-    $script:notice=if ($script:taskCandidates.Count) { '任务列表已更新，选择后点击“连接所选任务”。' } else { '没有可连接的本机任务，请先在 Codex 创建或打开一个任务。' }
+    $script:notice=if ($Warning) { $Warning } elseif ($script:taskCandidates.Count) { '对话列表已更新，选择后点击“连接所选任务”。' } else { '没有可连接的本机对话，请先在 Codex 创建或打开一个对话。' }
 }
 function Update-TaskSelection {
     $selected=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { $script:threadId }

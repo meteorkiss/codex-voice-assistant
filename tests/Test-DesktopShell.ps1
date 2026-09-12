@@ -84,11 +84,19 @@ try {
         for($other=0;$other -lt 3;$other++){Assert-Ui (($shell.Controls[$pageKeys[$other]].Visibility -eq 'Visible') -eq ($other -eq $pageIndex)) ('page visibility '+$pageNames[$pageIndex]+'/'+$pageNames[$other])}
         [void](Render-Element $shell.SettingsWindow.Content 714 600 ('settings-'+$pageNames[$pageIndex]) '#F5F5F7')
         if($pageIndex -eq 1){
-            Assert-Ui ($shell.Controls.SoundPage.ScrollableHeight -le 1) 'default sound page shows every option without scrolling'
+            # v0.6.17 adds the opt-in follow-up row; the scrollable page must
+            # keep the last option reachable instead of assuming zero scroll.
+            Assert-Ui ($shell.Controls.SoundPage.ExtentWidth -le ($shell.Controls.SoundPage.ViewportWidth+1)) 'default sound page has no horizontal overflow'
             Assert-Ui ([Windows.Controls.Grid]::GetRow($shell.Controls.WakePhraseActions) -eq 0) 'default wake actions remain beside the editor'
             Assert-Ui ($shell.Controls.WakePhraseBox.ActualWidth -ge 140) 'default wake editor retains readable width'
+            $shell.Controls.SoundPage.ScrollToEnd();$shell.Controls.SoundPage.UpdateLayout()
+            $lastOption=$shell.Controls.AutoSendToggle.TransformToAncestor($shell.Controls.SoundPage).Transform((New-Object Windows.Point(0,$shell.Controls.AutoSendToggle.ActualHeight)))
+            Assert-Ui ($lastOption.Y -gt $shell.Controls.AutoSendToggle.ActualHeight -and $lastOption.Y -le ($shell.Controls.SoundPage.ActualHeight+1)) 'last sound option is fully reachable by scrolling'
+            [void](Render-Element $shell.SettingsWindow.Content 714 600 'settings-sound-bottom' '#F5F5F7')
+            $shell.Controls.SoundPage.ScrollToTop();$shell.Controls.SoundPage.UpdateLayout()
         }
         [void](Render-Element $shell.SettingsWindow.Content 484 540 ('settings-'+$pageNames[$pageIndex]+'-narrow') '#F5F5F7')
+        if($pageIndex -eq 0){Assert-Ui ($shell.Controls.ConnectionPage.ExtentWidth -le ($shell.Controls.ConnectionPage.ViewportWidth+1)) 'keyword guidance fits the narrow connection page without horizontal overflow'}
     }
     Set-DesktopSettingsPage $shell 1
     [void](Render-Element $shell.SettingsWindow.Content 484 400 'settings-sound-minimum' '#F5F5F7')

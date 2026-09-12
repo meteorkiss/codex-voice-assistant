@@ -62,7 +62,8 @@
               <TextBlock Text="工作目录" Margin="0,10,0,8"/><ComboBox Name="DirectoryCombo" AutomationProperties.Name="按工作目录筛选现有任务"/>
               <TextBlock Text="只筛选现有任务，不改变任务目录。" Style="{StaticResource Note}" Margin="0,7,0,13"/>
               <Border Style="{StaticResource Divider}"/>
-              <TextBlock Text="目标任务" Margin="0,13,0,8"/><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><ComboBox Name="TaskCombo" IsEditable="True" IsReadOnly="True" IsTextSearchEnabled="True" AutomationProperties.Name="目标 Codex 任务"/><Button Name="RefreshTasksButton" Grid.Column="1" Content="刷新" Margin="8,0,0,0"/></Grid>
+              <TextBlock Text="目标对话 · 你的话会发到这里" Margin="0,13,0,8"/><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><ComboBox Name="TaskCombo" IsEditable="True" IsReadOnly="True" IsTextSearchEnabled="True" AutomationProperties.Name="目标 Codex 任务"/><Button Name="RefreshTasksButton" Grid.Column="1" Content="刷新" Margin="8,0,0,0"/></Grid>
+              <TextBlock Text="显示对话名称。可说“切到声伴 6.17”或“切到高斯泼溅”；匹配多个时再选择。" Style="{StaticResource Note}" Margin="0,8,0,0"/>
               <Button Name="BindTaskButton" Content="连接所选任务" HorizontalAlignment="Right" Background="#007AFF" Foreground="White" BorderBrush="#0072EC" Margin="0,12,0,10"/>
             </StackPanel></Border>
             <TextBlock Text="当前连接" Style="{StaticResource SectionLabel}" Margin="2,23,0,8"/>

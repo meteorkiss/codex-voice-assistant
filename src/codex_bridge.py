@@ -7,6 +7,7 @@ Send requires a stable requestId. Never automatically retry an uncertain send.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -198,6 +199,44 @@ def local_index_path(root):
     return max(indexes, key=lambda item: item[0])[1]
 
 
+def display_title_index(root):
+    """Read Codex's append-only display-name index, without conversation reads.
+
+    SQLite is the identity/path candidate index, not the sidebar rename store.
+    A partial trailing write is not a committed rename. Invalid rows cannot
+    replace a valid title; equal timestamps use the last complete record.
+    """
+    path = root / 'session_index.jsonl'
+    titles, versions = {}, {}
+    try:
+        with path.open('r', encoding='utf-8-sig') as stream:
+            for line in stream:
+                if not line.endswith('\n'):
+                    continue
+                try:
+                    item = json.loads(line)
+                    if not isinstance(item, dict):
+                        continue
+                    task_id = valid_thread(item.get('id'))
+                    title = item.get('thread_name')
+                    if not isinstance(title, str) or not title.strip():
+                        continue
+                    updated = datetime.fromisoformat(item['updated_at'].replace('Z', '+00:00'))
+                    if updated.tzinfo is None:
+                        continue
+                    updated = updated.astimezone(timezone.utc)
+                except (BridgeError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
+                    continue
+                if task_id not in versions or updated >= versions[task_id]:
+                    versions[task_id], titles[task_id] = updated, title
+    except FileNotFoundError:
+        return {}, False
+    except (OSError, UnicodeError) as exc:
+        raise BridgeError('title_index_unavailable',
+                          '无法读取 Codex 对话名称索引，请稍后刷新；不会改用过期名称。') from exc
+    return titles, True
+
+
 def list_tasks(cwd=None):
     """Index candidates only: no pipe, fabricated source task, or conversation reads.
 
@@ -260,8 +299,19 @@ def list_tasks(cwd=None):
     finally:
         if 'db' in locals():
             db.close()
+    # Join on verified candidate IDs only: the name index cannot introduce a
+    # remote, archived, missing, or child-agent target on its own.
+    titles, title_index_available = display_title_index(root)
+    for row in rows:
+        task_id = row['threadId']
+        row['titleSource'] = 'session_index' if task_id in titles else 'local_index'
+        if task_id in titles:
+            row['title'] = titles[task_id]
+    unsynced = sum(row['titleSource'] != 'session_index' for row in rows)
     return {'threads': rows, 'activeThreadDetection': 'explicit_binding',
             'source': 'local_index', 'indexFile': index.name,
+            'titleIndexAvailable': title_index_available, 'unsyncedTitleCount': unsynced,
+            'warning': '部分对话名称尚未同步，暂显示本地记录名；请在 Codex 核对后刷新。' if unsynced else '',
             'connectionState': 'not_checked', 'requiresValidation': True}
 
 
@@ -392,7 +442,10 @@ def handle(request):
             # Validate before any index access. Searching titles is independent
             # of the current binding, UI directory filter, and running pipe.
             validate_query(request.get('query'))
-            return match_tasks(request['query'], list_tasks()['threads'])
+            listing = list_tasks()
+            result = match_tasks(request['query'], listing['threads'])
+            result['warning'] = listing.get('warning', '')
+            return result
         except TaskMatchError as exc:
             raise BridgeError(exc.code, str(exc)) from exc
     thread_id = valid_thread(request.get('threadId'))

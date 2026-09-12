@@ -1,8 +1,9 @@
 """Conservative, title-only matching for local Codex task candidates.
 
-Matching precedence is normalized full title, literal title substring, then an
-exact window of Mandarin syllables (tones ignored). No edit distance, initials,
-word dropping, title-summary search, or task switching is performed here.
+Matching precedence is normalized full title, literal title substring, explicit
+keyword intersection, then an exact window of Mandarin syllables (tones ignored).
+No edit distance, initials, word dropping, title-summary search, or task switching
+is performed here. A bare two-part version can omit only the zero major version.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import re
 MAX_QUERY_LENGTH = 200
 MAX_CANDIDATES = 5
 MIN_PHONETIC_HAN = 3
+VERSION_TOKEN = re.compile(r'v[0-9]+(?:\.[0-9]+)*|[0-9]+(?:\.[0-9]+)+')
 
 
 class TaskMatchError(ValueError):
@@ -81,6 +83,46 @@ def contains_window(haystack, needle):
                for start in range(len(haystack) - width + 1))
 
 
+def version_matches(query_version, title_version):
+    """Compare complete version tokens, never an arbitrary digit substring.
+
+    An explicit v prefix is exact. A bare 6.17 may mean 6.17 or 0.6.17,
+    but not 1.6.17, 16.17, 6.170, or 6.17.1. Missing dots are not inferred.
+    """
+    if query_version.startswith('v'):
+        return query_version == title_version
+    title_number = title_version.removeprefix('v')
+    if query_version == title_number:
+        return True
+    parts = query_version.split('.')
+    return (len(parts) == 2 and parts[0] != '0' and
+            title_number == '0.' + query_version)
+
+
+def keyword_terms(query):
+    """Split only explicit whitespace and numeric version boundaries.
+
+    Keep words within each fragment intact. In particular, a short Han fragment
+    does not gain phonetic guessing merely because it appears with another word.
+    Spacing inside a spoken version (v 0 . 6 . 17) remains insignificant.
+    """
+    folded = unicodedata.normalize('NFKC', query).casefold()
+    folded = re.sub(r'(?<=[0-9])\s*\.\s*(?=[0-9])', '.', folded)
+    folded = re.sub(r'v\s+(?=[0-9])', 'v', folded)
+    terms = []
+    for part in folded.split():
+        normalized = normalize_title(part)
+        start = 0
+        for match in VERSION_TOKEN.finditer(normalized):
+            if match.start() > start:
+                terms.append((normalized[start:match.start()], False))
+            terms.append((match.group(), True))
+            start = match.end()
+        if start < len(normalized):
+            terms.append((normalized[start:], False))
+    return terms
+
+
 def match_tasks(query, threads):
     """Return original candidates in index order, capped at five on ambiguity.
 
@@ -90,24 +132,36 @@ def match_tasks(query, threads):
     before the caller can bind it.
     """
     query, normalized = validate_query(query)
-    titled = [(thread, normalize_title(thread['title'])) for thread in threads
+    terms = keyword_terms(query)
+    titled = [(thread, normalize_title(thread['title']),
+               [term for term, is_version in keyword_terms(thread['title']) if is_version])
+              for thread in threads
               if isinstance(thread, dict) and isinstance(thread.get('title'), str)]
-    # A spoken V0.6.17 must not bind V0.6.170 / V0.6.17.1 via substring or
-    # phonetic matching. Spacing was removed above without dropping digit dots.
-    versions = re.findall(r'v[0-9]+(?:\.[0-9]+)*', normalized)
+    # Every matching mode observes numeric boundaries, including a bare version
+    # fragment. Spacing was removed above without dropping digit dots.
+    versions = [term for term, is_version in terms if is_version]
     if versions:
-        titled = [(thread, title) for thread, title in titled
-                  if all(version in re.findall(r'v[0-9]+(?:\.[0-9]+)*', title)
+        titled = [(thread, title, title_versions) for thread, title, title_versions in titled
+                  if all(any(version_matches(version, title_version)
+                             for title_version in title_versions)
                          for version in versions)]
-    matches = [thread for thread, title in titled if title == normalized]
+    matches = [thread for thread, title, _ in titled if title == normalized]
     method = 'exact'
     if not matches:
         method = 'contains'
-        matches = [thread for thread, title in titled if normalized in title]
+        matches = [thread for thread, title, _ in titled if normalized in title]
+    if not matches:
+        method = 'keywords'
+        matches = [thread for thread, title, title_versions in titled
+                   if terms and all(
+                       any(version_matches(term, title_version)
+                           for title_version in title_versions)
+                       if is_version else term in title
+                       for term, is_version in terms)]
     if not matches and titled and sum(is_han(char) for char in normalized) >= MIN_PHONETIC_HAN:
         method = 'phonetic'
         needle = phonetic_units(normalized)
-        matches = [thread for thread, title in titled
+        matches = [thread for thread, title, _ in titled
                    if len(title) >= len(normalized) and
                    contains_window(phonetic_units(title), needle)]
     total = len(matches)

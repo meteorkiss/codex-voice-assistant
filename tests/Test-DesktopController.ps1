@@ -92,6 +92,10 @@ try {
         Assert-That ($last.request.action -eq 'list' -and -not $last.request.ContainsKey('threadId')) 'First list needs an existing task.'
         Set-TaskCandidates @($taskA,$taskB)
         Assert-That ($TaskCombo.SelectedIndex -eq -1) 'First candidate was automatically selected.'
+        Assert-That ($script:notice -eq '对话列表已更新，选择后点击“连接所选任务”。') 'The refreshed list did not explain the explicit connection step.'
+        Set-TaskCandidates @($taskA,$taskB) '部分对话名称尚未同步。'
+        Assert-That ($script:notice -eq '部分对话名称尚未同步。') 'The title synchronization warning was hidden.'
+        Assert-That ($TaskCombo.SelectedIndex -eq -1 -and -not $script:threadId) 'A title warning changed the target.'
         $before=Count-Effect 'bridge'; Invoke-Click $BindTaskButton
         Assert-That ((Count-Effect 'bridge') -eq $before) 'Bind submitted without a selected task.'
     }

@@ -322,6 +322,114 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(out['threads'][0]['title'], expected['title'])
         self.assertTrue(out['threads'][0]['requiresValidation'])
 
+    def title_record(self, task_id, title, updated='2026-09-12T06:38:44.2105951Z'):
+        return json.dumps({'id': task_id, 'thread_name': title, 'updated_at': updated},
+                          ensure_ascii=False) + '\n'
+
+    def test_sidebar_title_shared_by_list_and_keyword_lookup_without_pipe(self):
+        with self.index() as db:
+            row = self.add_task(db, title='这声伴怎么又不识别声音了。另外我需要验收什么内容')
+        db.close()
+        title = '声伴 v0.6.17 · 短时连续接话'
+        index = self.root / 'session_index.jsonl'
+        index.write_text(self.title_record(row['id'], title), encoding='utf-8-sig')
+        before = index.read_bytes()
+        with patch.object(bridge, 'discover_pipe') as discover, patch.object(bridge, 'app_tool') as call, \
+                patch.object(bridge, 'read_task') as read, patch.object(bridge, 'is_subagent') as content_read:
+            listing = bridge.handle({'action': 'list'})
+            for query in ('6.17', '声伴 6.17', '6.17 声伴', '声伴6.17'):
+                result = bridge.handle({'action': 'find', 'query': query})
+                self.assertEqual(result['matchType'], 'unique')
+                self.assertEqual(result['threads'][0]['threadId'], row['id'])
+                self.assertEqual(result['threads'][0]['title'], title)
+                self.assertEqual(result['warning'], '')
+        for operation in (discover, call, read, content_read):
+            operation.assert_not_called()
+        self.assertEqual(listing['threads'][0]['title'], title)
+        self.assertEqual(listing['threads'][0]['titleSource'], 'session_index')
+        self.assertEqual(listing['unsyncedTitleCount'], 0)
+        self.assertTrue(listing['titleIndexAvailable'])
+        self.assertEqual(index.read_bytes(), before)
+        with sqlite3.connect(self.root / 'state_5.sqlite') as db:
+            self.assertEqual(db.execute('SELECT title FROM threads').fetchone()[0], row['title'])
+        db.close()
+
+    def test_title_updates_are_latest_utc_then_last_complete_record(self):
+        task_id = str(uuid.uuid4())
+        index = self.root / 'session_index.jsonl'
+        records = [self.title_record(task_id, '新名称', '2026-09-12T07:00:00Z'),
+                   self.title_record(task_id, '较早到达但时间旧', '2026-09-12T14:59:59+08:00'),
+                   self.title_record(task_id, '同一时间后写', '2026-09-12T15:00:00+08:00'),
+                   self.title_record(task_id, '未提交末行', '2026-09-12T08:00:00Z').rstrip('\n')]
+        index.write_text(''.join(records), encoding='utf-8')
+        self.assertEqual(bridge.display_title_index(self.root), ({task_id: '同一时间后写'}, True))
+
+    def test_invalid_title_rows_preserve_previous_valid_name(self):
+        task_id = str(uuid.uuid4())
+        records = [self.title_record(task_id, '有效名称'), '{not-json}\n', '[]\n',
+                   self.title_record('not-a-guid', '假任务'), self.title_record(task_id, '  '),
+                   self.title_record(task_id, 123), self.title_record(task_id, '坏时间', None),
+                   self.title_record(task_id, '坏时间', 'unknown'),
+                   self.title_record(task_id, 'UTC越界', '0001-01-01T00:00:00+01:00'),
+                   self.title_record(task_id, '无时区', '2026-09-13T07:00:00'), '{}\n',
+                   '{"id":']
+        (self.root / 'session_index.jsonl').write_text(''.join(records), encoding='utf-8')
+        self.assertEqual(bridge.display_title_index(self.root), ({task_id: '有效名称'}, True))
+
+    def test_title_index_cannot_add_excluded_or_unknown_candidates(self):
+        with self.index(extra=', host_id TEXT DEFAULT "local", kind TEXT DEFAULT "codex"') as db:
+            rows = [self.add_task(db, title='首句')]
+            for values in ({'archived': 1}, {'agent_path': '/root/child'},
+                           {'host_id': 'remote'}, {'kind': 'chatgpt'}):
+                rows.append(self.add_task(db, **values))
+            missing = self.add_task(db)
+            Path(missing['rollout_path']).unlink()
+            rows.append(missing)
+        db.close()
+        records = [self.title_record(row['id'], '声伴 6.17') for row in rows]
+        records.append(self.title_record(str(uuid.uuid4()), '声伴 6.17'))
+        (self.root / 'session_index.jsonl').write_text(''.join(records), encoding='utf-8')
+        result = bridge.handle({'action': 'find', 'query': '6.17'})
+        self.assertEqual(result['matchType'], 'unique')
+        self.assertEqual([row['threadId'] for row in result['threads']], [rows[0]['id']])
+
+    def test_missing_or_partial_title_coverage_is_visible_not_hidden(self):
+        with self.index() as db:
+            covered = self.add_task(db, title='原始名称一')
+            fallback = self.add_task(db, title='原始名称二')
+        db.close()
+        missing = bridge.handle({'action': 'list'})
+        self.assertFalse(missing['titleIndexAvailable'])
+        self.assertEqual(missing['unsyncedTitleCount'], 2)
+        self.assertTrue(missing['warning'])
+        (self.root / 'session_index.jsonl').write_text(
+            self.title_record(covered['id'], '新名称'), encoding='utf-8')
+        partial = bridge.handle({'action': 'list'})
+        self.assertTrue(partial['titleIndexAvailable'])
+        self.assertEqual(partial['unsyncedTitleCount'], 1)
+        self.assertTrue(partial['warning'])
+        result = bridge.handle({'action': 'find', 'query': fallback['title']})
+        self.assertEqual(result['threads'][0]['titleSource'], 'local_index')
+        self.assertTrue(result['warning'])
+
+    def test_unreadable_title_index_does_not_silently_use_stale_names(self):
+        with patch.object(Path, 'open', side_effect=PermissionError('busy')):
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.display_title_index(self.root)
+        self.assertEqual(error.exception.code, 'title_index_unavailable')
+
+    def test_refresh_observes_appended_rename_and_drops_old_title_match(self):
+        with self.index() as db:
+            row = self.add_task(db)
+        db.close()
+        index = self.root / 'session_index.jsonl'
+        index.write_text(self.title_record(row['id'], '高斯泼溅研究'), encoding='utf-8')
+        self.assertEqual(bridge.handle({'action': 'find', 'query': '高斯泼溅'})['matchType'], 'unique')
+        with index.open('a', encoding='utf-8') as stream:
+            stream.write(self.title_record(row['id'], '声伴 v0.6.17', '2026-09-12T08:00:00Z'))
+        self.assertEqual(bridge.handle({'action': 'find', 'query': '高斯泼溅'})['matchType'], 'none')
+        self.assertEqual(bridge.handle({'action': 'find', 'query': '6.17'})['matchType'], 'unique')
+
     def test_find_validates_query_before_index_or_connection(self):
         for query in (None, 123, [], {}, '', '高', '！', 'x' * 201):
             with self.subTest(query=query), patch.object(bridge, 'list_tasks') as listing, \
