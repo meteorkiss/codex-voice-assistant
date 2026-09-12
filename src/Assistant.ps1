@@ -75,6 +75,7 @@ $script:lastTestCommand = ''
 $script:latest = ''
 $script:epoch = 0
 $script:ttsEpoch = -1
+$script:lastSpeechEpoch = -1
 $script:lastMicVersion = 0L
 $script:lastUserVersion = 0
 $script:lastTailRead = [DateTime]::MinValue
@@ -135,7 +136,7 @@ function Reset-WakeRecoveryAudioRoute {
     [CodexReader.AudioPlayer]::SelectEndpoint('')
     return @{ CaptureEndpointId=$capture; RenderEndpointId=[CodexReader.AudioPlayer]::RenderEndpointId }
 }
-function Send-Text {
+function Send-Text([string]$VoiceSource = '') {
     $script:autoDispatch=$null
     if ($script:recMode -ne 'idle') { return }
     $text = $InputBox.Text.Trim()
@@ -150,6 +151,7 @@ function Send-Text {
     if ($TestMode) { $script:notice = '测试模式：已准备文字，未向真实任务发送。'; return }
     $requestId = [Guid]::NewGuid().ToString()
     if (Start-Bridge @{ action='send'; threadId=$script:threadId; text=$text; requestId=$requestId } 'send') {
+        if ($VoiceSource -in @('wake','follow-up') -and $script:bridgeJob) { $script:bridgeJob.VoiceSource=$VoiceSource }
         $script:notice = '正在发送给 Codex…'
         $InputBox.IsReadOnly = $true
     }
@@ -188,6 +190,7 @@ function End-Recording([bool]$SendAfter) {
     $script:submitAfterRecognition = $SendAfter
     $script:recordPath = Join-Path $runtime ([Guid]::NewGuid().ToString('N') + '.wav')
     $script:recMode = 'stopping'
+    if ($script:followUpCapture -and $script:shortFollowUp) { $script:shortFollowUp.Phase='recognizing'; $script:shortFollowUp.Deadline=[DateTime]::UtcNow.AddMinutes(1) }
     $script:recorder.StopToFileAsync($script:recordPath)
     $script:notice = '正在把你的话转成文字…'
 }
@@ -210,7 +213,7 @@ function Cancel-Recording {
 function Begin-Transcription([string]$WavePath, [bool]$SendAfter) {
     $resultPath = Join-Path $runtime ([Guid]::NewGuid().ToString('N') + '.asr.json')
     $proc = Start-Worker $asrPython (Join-Path $PSScriptRoot 'transcribe.py') @('--input',$WavePath,'--output',$resultPath,'--model-dir',$modelDir)
-    $script:asrJob = @{ Process=$proc; Output=$resultPath; Files=@($resultPath,$WavePath); Started=[DateTime]::UtcNow; Generation=$script:voiceGeneration; ThreadId=$script:threadId; SendAfter=$SendAfter; Prefix=$script:recordPrefix; FromWake=$script:handsFreeCapture }
+    $script:asrJob = @{ Process=$proc; Output=$resultPath; Files=@($resultPath,$WavePath); Started=[DateTime]::UtcNow; Generation=$script:voiceGeneration; ThreadId=$script:threadId; SendAfter=$SendAfter; Prefix=$script:recordPrefix; FromWake=$script:handsFreeCapture; FromFollowUp=$script:followUpCapture }
     $script:submitAfterRecognition=$SendAfter
     $script:recMode='transcribing'
 }
@@ -223,6 +226,7 @@ function Apply-Thread($Result) {
     $reuseTail=($script:connected -and $script:threadId -eq $Result.threadId -and $script:tail -and $script:tail.Path -eq $path)
     $nextTail=if ($reuseTail) { $script:tail } else { New-TranscriptTail $path }
     if ($script:threadId -ne $Result.threadId) {
+        if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标任务已改变，连续接话已结束。' -CancelCapture }
         Suspend-WakeListener
         $script:voiceGeneration++; $script:autoDispatch=$null
         $script:handsFreePhase=if ($script:handsFreeEnabled) { 'waiting' } else { 'off' }
@@ -283,6 +287,7 @@ try {
     })
     $StopButton.Add_Click({
         Reset-ManualTaskBinding '已取消这次连接。'
+        if ($script:shortFollowUp -or $script:followUpCapture) { Stop-ShortFollowUpByUser; return }
         Stop-Output '已停止朗读。'
         if ($script:handsFreePhase -in @('releasing','answering-wake','acknowledging')) { $script:handsFreePhase='waiting'; Suspend-WakeListener }
         if ($script:recMode -ne 'idle') { Cancel-Recording }
@@ -300,6 +305,7 @@ try {
     $speakItem=$menu.Items.Add('开始说话')
     $pauseResumeItem=$menu.Items.Add('暂停朗读')
     $stopItem=$menu.Items.Add('停止朗读')
+    $followUpItem=$menu.Items.Add('结束连续接话')
     $handsFreeItem=$menu.Items.Add('免点击语音唤醒')
     $autoItem=$menu.Items.Add('手动录音停顿后自动发送')
     $replayItem=$menu.Items.Add('重读上一条回答')
@@ -316,6 +322,7 @@ try {
     $speakItem.Add_Click({ Open-VoiceComposer })
     $pauseResumeItem.Add_Click({ Toggle-AnswerPlayback })
     $stopItem.Add_Click({ Stop-Output '已停止朗读。' })
+    $followUpItem.Add_Click({ Stop-ShortFollowUpByUser })
     $openItem.Add_Click({ if ($script:connected) { [void](Start-Bridge @{action='open';threadId=$script:threadId} 'open') } })
     $handsFreeItem.Add_Click({ Set-HandsFree (-not $script:handsFreeEnabled); Sync-DesktopPreferences; Save-Settings })
     $confirmSendItem.Add_Click({
@@ -371,8 +378,10 @@ try {
             if ($script:recMode -eq 'listening') {
                 if ($script:recorder.Error) { throw $script:recorder.Error }
                 if (($script:autoSend -or $script:handsFreeCapture) -and $script:recorder.LastVoiceUtc -gt $script:recorder.StartedUtc -and ($now-$script:recorder.LastVoiceUtc).TotalSeconds -ge 2 -and ($now-$script:recorder.StartedUtc).TotalSeconds -ge 2.5) { End-Recording $true }
-                if ($script:handsFreeCapture -and $script:recorder.LastVoiceUtc -le $script:recorder.StartedUtc -and ($now-$script:recorder.StartedUtc).TotalSeconds -ge 8) { Cancel-Recording; $script:notice='没有听到问题，已回到唤醒待机。' }
-                if ($script:recMode -eq 'listening' -and ($now-$script:recorder.StartedUtc).TotalMinutes -ge 5) { End-Recording $script:handsFreeCapture }
+                if ($script:followUpCapture -and $script:recorder.LastVoiceUtc -le $script:recorder.StartedUtc -and ($now-$script:recorder.StartedUtc).TotalSeconds -ge $script:shortFollowUpWaitSeconds) { Close-ShortFollowUp '连续接话等待已超时，已回到唤醒待机。' -CancelCapture }
+                elseif ($script:handsFreeCapture -and $script:recorder.LastVoiceUtc -le $script:recorder.StartedUtc -and ($now-$script:recorder.StartedUtc).TotalSeconds -ge 8) { Cancel-Recording; $script:notice='没有听到问题，已回到唤醒待机。' }
+                if ($script:recMode -eq 'listening' -and $script:followUpCapture -and ($now-$script:recorder.StartedUtc).TotalSeconds -ge $script:shortFollowUpMaxSeconds) { End-Recording $true; $script:notice='连续接话已达到 30 秒上限，正在保留并识别这句话。' }
+                elseif ($script:recMode -eq 'listening' -and ($now-$script:recorder.StartedUtc).TotalMinutes -ge 5) { End-Recording $script:handsFreeCapture }
             }
             if ($script:recMode -eq 'stopping' -and -not $script:recorder.IsStopping) {
                 if ($script:recorder.Error) { throw $script:recorder.Error }
@@ -385,12 +394,20 @@ try {
                 $code=$job.Process.ExitCode; Close-Job $job
                 $script:recMode='idle'; $InputBox.IsReadOnly=$false
                 $script:handsFreeCapture=$false
+                $script:followUpCapture=$false
                 if ($code -ne 0 -or -not $result -or -not $result.ok -or $result.error) { throw '语音识别没有完成，请重新说一次。' }
                 if ($job.Generation -eq $script:voiceGeneration -and $job.ThreadId -eq $script:threadId -and -not $script:closing) {
                     $recognized=[string]$result.text
                     $InputBox.Text=if ($job.Prefix -and $recognized.Trim()) { $job.Prefix + [Environment]::NewLine + $recognized } elseif ($job.Prefix) { $job.Prefix } else { $recognized }
                     $script:notice=if ($InputBox.Text.Trim()) { '文字已识别，可以修改或发送。' } else { '没有听清内容，已回到待机。' }
-                    if ($job.SendAfter -and $recognized.Trim()) { $script:autoDispatch=@{Generation=$job.Generation;ThreadId=$job.ThreadId;Text=$InputBox.Text.Trim()}; $script:submitAfterRecognition=$false }
+                    if ($job.FromFollowUp -and -not (Test-ShortFollowUpTranscript $recognized)) {
+                        Close-ShortFollowUp $(if ($recognized.Trim()) { '内容不够明确，已保留草稿但不会自动发送。' } else { '没有听清内容，已回到唤醒待机。' })
+                    } elseif ($job.SendAfter -and $recognized.Trim()) {
+                        $source=if ($job.FromFollowUp) { 'follow-up' } elseif ($job.FromWake) { 'wake' } else { '' }
+                        $script:autoDispatch=@{Generation=$job.Generation;ThreadId=$job.ThreadId;Text=$InputBox.Text.Trim();VoiceSource=$source}
+                        if ($job.FromFollowUp -and $script:shortFollowUp) { $script:shortFollowUp.Phase='dispatching'; $script:shortFollowUp.DraftText=$InputBox.Text.Trim(); $script:shortFollowUp.Deadline=$now.AddMinutes(1) }
+                        $script:submitAfterRecognition=$false
+                    } elseif ($job.FromFollowUp) { Close-ShortFollowUp }
                 }
             }
             if ($script:bridgeJob -and $script:bridgeJob.Process.HasExited) {
@@ -416,11 +433,15 @@ try {
                     $bound=Complete-ManualTaskBinding $result $job.TaskBindingContext
                     if ($bound -and $TestAudioPath) { $script:recMode='transcribing'; Begin-Transcription $TestAudioPath $false; $TestAudioPath='' }
                 } elseif (-not $result -or -not $result.ok) {
+                    if ($job.VoiceSource) { Close-ShortFollowUp }
                     $script:notice=if ($script:pendingUncertain) { '发送状态待确认，请先在 Codex 查看，核对后可在托盘解除。' } elseif ($result.error.message) { 'Codex 连接失败：' + [string]$result.error.message } else { '无法连接 Codex，请确认它正在运行。' }
                 } elseif ($purpose -eq 'list') { Set-TaskCandidates $result.threads }
                 elseif ($purpose -eq 'send') {
-                    if ($receiptState -eq 'accepted') { $script:sent++; $script:busy=$true; $script:notice='已发送，Codex 正在处理…'; $InputBox.Text='' }
-                    else { $script:notice='发送回执不完整，请先到 Codex 核对，程序不会重发。' }
+                    if ($receiptState -eq 'accepted') {
+                        $script:sent++; $script:busy=$true; $script:notice='已发送，Codex 正在处理…'; $InputBox.Text=''
+                        if ($job.VoiceSource) { Start-ShortFollowUpWait ([string]$job.VoiceSource) }
+                    }
+                    else { if ($job.VoiceSource) { Close-ShortFollowUp }; $script:notice='发送回执不完整，请先到 Codex 核对，程序不会重发。' }
                 }
                 elseif ($purpose -eq 'open') { $script:notice='已打开当前 Codex 任务。' }
             }
@@ -436,6 +457,7 @@ try {
                     if ($answer.UserTurnVersion -eq $script:tail.UserTurnVersion) {
                         $script:busy=$false; $script:notice='回答完成。'
                         if ($script:autoRead) { Queue-AnswerSpeech $answer.Text }
+                        if (Get-Command Register-ShortFollowUpAnswer -ErrorAction SilentlyContinue) { Register-ShortFollowUpAnswer }
                     }
                 }
             }
@@ -448,10 +470,11 @@ try {
             # before generic cleanup changes the player from stopped to closed.
             if (-not $playbackHeld -and $script:audioPath -and $script:handsFreePhase -ne 'acknowledging') { [CodexReader.AudioPlayer]::Stop(); Remove-OwnedFiles @($script:audioPath); $script:audioPath='' }
             if (-not $playbackHeld -and -not $script:ttsJob -and $script:speechQueue.Count -gt 0 -and (Safe-To-Play)) { Begin-Speech $script:speechQueue.Dequeue() }
+            Update-ShortFollowUp $now
 
             Update-AssistantAudioLevel
-            $StatusLabel.Text=if ($script:recMode -eq 'arming') { '正在准备麦克风…' }
-                elseif ($script:recMode -eq 'listening') { '正在听 · ' + [int]($now-$script:recorder.StartedUtc).TotalSeconds + ' 秒' }
+            $StatusLabel.Text=if ($script:recMode -eq 'arming') { if ($script:followUpCapture) { '连续接话 · 正在准备麦克风…' } else { '正在准备麦克风…' } }
+                elseif ($script:recMode -eq 'listening') { $(if ($script:followUpCapture) { '连续接话 · 正在听 · ' } else { '正在听 · ' }) + [int]($now-$script:recorder.StartedUtc).TotalSeconds + ' 秒' }
                 elseif ($script:recMode -in @('stopping','transcribing')) { '正在把语音转成文字…' }
                 elseif ($now -lt $script:localCommandNoticeUntil) { $script:localCommandMessage + $(if ($script:pendingUncertain) { ' · 上次发送仍待核对' } elseif ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { ' · 消息正在发送' }) }
                 elseif ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { '正在发送给 Codex…' }
@@ -471,9 +494,10 @@ try {
             $SpeakButton.IsEnabled=($script:connected -and $script:recMode -in @('idle','listening') -and -not ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send'))
             $localReady=($script:recMode -eq 'idle' -and $null -ne (Get-AssistantVoiceCommand $InputBox.Text))
             $SendButton.IsEnabled=($localReady -or ($script:connected -and -not $script:bridgeJob -and $script:recMode -ne 'arming' -and -not $script:pendingUncertain))
-            $StopButton.Content=if ($script:recMode -ne 'idle') { '取消录音' } else { '停止朗读' }
+            $StopButton.Content=if ($script:shortFollowUp -or $script:followUpCapture) { '结束接话' } elseif ($script:recMode -ne 'idle') { '取消录音' } else { '停止朗读' }
             $AnswerStateLabel.Text=if ($script:busy) { '处理中' } elseif ($playing) { '正在朗读' } else { '文字 · 语音' }
-            $FooterHint.Text=if ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
+            $FooterHint.Text=if ($script:shortFollowUp -or $script:followUpCapture) { '连续接话有时限 · 可随时点“结束接话”' } elseif ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
+            if ($followUpItem) { $followUpItem.Enabled=[bool]($script:shortFollowUp -or $script:followUpCapture) }
             Update-DesktopDisplay
             if ($script:positionDirty -and ($now-$script:lastPositionChange).TotalMilliseconds -gt 700) { $script:positionDirty=$false; Save-Settings }
             if ($TestMode -and $TestCommandPath -and (Test-Path -LiteralPath $TestCommandPath)) {
@@ -508,7 +532,7 @@ try {
             $StatusLabel.Text=$script:notice
         }
         if ($StatusPath -and ([DateTime]::UtcNow-$script:lastStatusWrite).TotalMilliseconds -ge 250) {
-            $statusData=@{version=6;bargeInEnabled=$script:bargeInEnabled;echoReady=(Test-FullDuplexReady);echoQuestionCapture=$script:echoQuestionCapture;handsFreeEnabled=$script:handsFreeEnabled;handsFreePhase=$script:handsFreePhase;wakePhrase=$script:wakePhrase;wakeCount=$script:wakeCount;wakeListening=$script:wakeListener.IsListening;wakeReady=$script:wakeListener.IsReady;autoSendPrepared=$script:autoSendPrepared;connected=$script:connected;threadId=$script:threadId;recordingMode=$script:recMode;level=$script:level;status=$StatusLabel.Text;received=$script:received;spoken=$script:spoken;sent=$script:sent;busy=$script:busy;error=$script:errorText;micReady=$script:mic.Ready;micActive=$script:mic.AnyCaptureActive;topmost=$window.Topmost;windowVisible=$window.IsVisible;voice=$script:voiceId;autoSend=$script:autoSend;playerState=[CodexReader.AudioPlayer]::State;compact=(-not $script:captionsVisible);style=$script:waveStyle;waveSize=$script:waveSize;speechRate=$script:speechRate;autoRead=$script:autoRead;settingsVisible=$desktop.SettingsWindow.IsVisible;captionVisible=$desktop.CaptionWindow.IsVisible;pid=$PID}
+            $statusData=@{version=7;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;shortFollowUpPhase=if($script:shortFollowUp){$script:shortFollowUp.Phase}else{'idle'};followUpCapture=$script:followUpCapture;echoReady=(Test-FullDuplexReady);echoQuestionCapture=$script:echoQuestionCapture;handsFreeEnabled=$script:handsFreeEnabled;handsFreePhase=$script:handsFreePhase;wakePhrase=$script:wakePhrase;wakeCount=$script:wakeCount;wakeListening=$script:wakeListener.IsListening;wakeReady=$script:wakeListener.IsReady;autoSendPrepared=$script:autoSendPrepared;connected=$script:connected;threadId=$script:threadId;recordingMode=$script:recMode;level=$script:level;status=$StatusLabel.Text;received=$script:received;spoken=$script:spoken;sent=$script:sent;busy=$script:busy;error=$script:errorText;micReady=$script:mic.Ready;micActive=$script:mic.AnyCaptureActive;topmost=$window.Topmost;windowVisible=$window.IsVisible;voice=$script:voiceId;autoSend=$script:autoSend;playerState=[CodexReader.AudioPlayer]::State;compact=(-not $script:captionsVisible);style=$script:waveStyle;waveSize=$script:waveSize;speechRate=$script:speechRate;autoRead=$script:autoRead;settingsVisible=$desktop.SettingsWindow.IsVisible;captionVisible=$desktop.CaptionWindow.IsVisible;pid=$PID}
             if ($TestMode) { $statusData.inputText=$InputBox.Text; $statusData.answerText=$AnswerBox.Text; $statusData.testCommand=$script:lastTestCommand; $statusData.taskCandidateCount=@($script:taskCandidates).Count; $statusData.selectedTaskId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' } }
             $statusData.localCommandCount=$script:localCommandCount
             $statusData.lastLocalCommand=$script:lastLocalCommand

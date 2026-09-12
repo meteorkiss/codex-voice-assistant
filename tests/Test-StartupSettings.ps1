@@ -17,7 +17,7 @@ $settingsPath=Join-Path $runDir 'settings.json'
 $savedThread='11111111-1111-4111-8111-111111111111'
 $explicitThread='22222222-2222-4222-8222-222222222222'
 $phrase=([char]0x4f60).ToString()+[char]0x597d+[char]0xff0c+[char]0x58f0+[char]0x4f34
-$json=@{threadId=$savedThread;voice='zh-TW-HsiaoYuNeural';autoSend=$true;handsFreeEnabled=$true;wakePhrase=$phrase} | ConvertTo-Json
+$json=@{threadId=$savedThread;voice='zh-TW-HsiaoYuNeural';autoSend=$true;handsFreeEnabled=$true;shortFollowUpEnabled=$true;wakePhrase=$phrase} | ConvertTo-Json
 $checks=0
 foreach ($withBom in @($false,$true)) {
     [IO.File]::WriteAllText($settingsPath,$json,(New-Object Text.UTF8Encoding($withBom)))
@@ -25,11 +25,12 @@ foreach ($withBom in @($false,$true)) {
         foreach ($isolated in @('live','test','preview')) {
             $ThreadId=if ($explicit) {$explicitThread} else {''}
             $TestMode=($isolated -eq 'test'); $PreviewPath=if ($isolated -eq 'preview') {'preview.png'} else {''}
-            $script:handsFreeEnabled=$false; $script:wakePhrase='default'; $script:autoSend=$false; $script:voiceId='default'
+            $script:handsFreeEnabled=$false; $script:shortFollowUpEnabled=$false; $script:wakePhrase='default'; $script:autoSend=$false; $script:voiceId='default'
             . $initializer
             $expectedThread=if ($explicit) {$explicitThread} else {$savedThread}
             if ($script:threadId -ne $expectedThread) { throw "Wrong restored task: BOM=$withBom explicit=$explicit mode=$isolated" }
             if ($script:handsFreeEnabled -ne ($isolated -eq 'live')) { throw "Wrong wake opt-in: BOM=$withBom mode=$isolated" }
+            if ($script:shortFollowUpEnabled -ne ($isolated -eq 'live')) { throw "Wrong follow-up opt-in: BOM=$withBom mode=$isolated" }
             if ($script:wakePhrase -cne $phrase -or $script:voiceId -ne 'zh-TW-HsiaoYuNeural' -or -not $script:autoSend) { throw 'UTF-8 preferences not restored.' }
             $checks++
         }

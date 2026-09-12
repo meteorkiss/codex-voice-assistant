@@ -113,6 +113,17 @@ public sealed class WakeListener : IDisposable
     {
         lock(gate) { if(!HasQuestion) return null; questionTaken=true; return question; }
     }
+    // Convert the already-running AEC stream into a short follow-up recorder.
+    // Capture begins before the UI handoff, so the first word is not lost.
+    public bool BeginFollowUpQuestion()
+    {
+        lock(gate)
+        {
+            if(!listening || stopping || disposed || !echoMode || fixtureMode || !ReadyLocked(Stopwatch.GetTimestamp()) || echoDetected || question!=null) return false;
+            echoDetected=true; questionTaken=false; question=new QuestionRecorder(this,new byte[0]);
+            ring.Clear(); echoPending.Clear(); return true;
+        }
+    }
     public void Start() { Start("你好，声伴"); }
     public void Start(string wakePhrase) { Begin(wakePhrase,null); }
     public void StartEcho(string wakePhrase,string captureId,string renderId) { Begin(wakePhrase,null,true,captureId,renderId); }
@@ -185,7 +196,7 @@ public sealed class WakeListener : IDisposable
         if(error.Length>0 || healthError.Length>0)
         { value.State="error"; value.Reason=healthError.Length>0 ? healthError : "worker-error"; value.NeedsRecovery=true; return value; }
         if(!listening) return value;
-        bool initialized=lastCaptureTicks!=0 && (hasActivated || lastProgressTicks!=0);
+        bool initialized=lastCaptureTicks!=0 && (hasActivated || echoDetected || lastProgressTicks!=0);
         if(!initialized)
         {
             value.State="starting";
@@ -193,10 +204,10 @@ public sealed class WakeListener : IDisposable
             return value;
         }
         if(value.CaptureAgeMs>3000) value.Reason="capture-stalled";
-        else if(!hasActivated && value.ProgressAgeMs>3000) value.Reason="progress-stalled";
+        else if(!hasActivated && !echoDetected && value.ProgressAgeMs>3000) value.Reason="progress-stalled";
         // Include captured PCM still queued before stdin; a responsive worker
         // must not hide a blocked/slow producer. Accelerated files are exempt.
-        else if(!fixtureMode && !hasActivated && capturedSamples-processedSamples>48000) value.Reason="progress-lag";
+        else if(!fixtureMode && !hasActivated && !echoDetected && capturedSamples-processedSamples>48000) value.Reason="progress-lag";
         if(value.Reason.Length>0) { value.State="stalled"; value.NeedsRecovery=true; }
         else value.State="healthy";
         return value;

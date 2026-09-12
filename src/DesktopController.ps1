@@ -144,6 +144,7 @@ function Sync-DesktopPreferences {
         $MenuCaptions.IsChecked=$script:captionsVisible
         $HandsFreeToggle.IsChecked=$script:handsFreeEnabled
         if ($desktop.Controls.ContainsKey('BargeInToggle')) { $desktop.Controls.BargeInToggle.IsChecked=$script:bargeInEnabled }
+        if ($desktop.Controls.ContainsKey('ShortFollowUpToggle')) { $desktop.Controls.ShortFollowUpToggle.IsChecked=$script:shortFollowUpEnabled }
         $AutoSendToggle.IsChecked=$script:autoSend
         $AutoReadToggle.IsChecked=$script:autoRead
         $MenuVisibility.Header=if ($script:floatingVisible) { '隐藏悬浮声波' } else { '显示悬浮声波' }
@@ -193,6 +194,7 @@ function Update-DesktopDisplay {
     if ($desktop.Controls.ContainsKey('EchoStatusLabel')) {
         $desktop.Controls.EchoStatusLabel.Text=if ($script:wakeListener -and $script:wakeListener.Error) { '音频设备未就绪：'+$script:wakeListener.Error } elseif (-not $script:bargeInEnabled) { '轮流听说：朗读结束后恢复语音唤醒。' } elseif (-not $script:handsFreeEnabled) { '开启语音唤醒后检查回声消除设备。' } elseif (Test-FullDuplexReady) { '回声消除已就绪，朗读中可喊“'+$script:wakePhrase+'”。' } else { '正在准备回声消除；设备不兼容时可关闭此选项。' }
     }
+    if ($desktop.Controls.ContainsKey('MenuFollowUpEnd')) { $desktop.Controls.MenuFollowUpEnd.IsEnabled=[bool]($script:shortFollowUp -or $script:followUpCapture) }
     $BindTaskButton.IsEnabled=($null -ne $TaskCombo.SelectedItem -and -not $script:bridgeJob -and $script:recMode -eq 'idle')
     $RefreshTasksButton.IsEnabled=(-not $script:bridgeJob)
     $OpenTaskButton.IsEnabled=($script:connected -and -not $script:bridgeJob)
@@ -231,22 +233,41 @@ function Initialize-DesktopController {
             Save-Settings
         })
     }
+    if ($desktop.Controls.ContainsKey('ShortFollowUpToggle')) {
+        $desktop.Controls.ShortFollowUpToggle.Add_Click({
+            $enabled=[bool]$desktop.Controls.ShortFollowUpToggle.IsChecked
+            if (Invoke-DesktopPreference @{shortFollowUpEnabled=$enabled}) {
+                if (-not $enabled -and (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue)) { Close-ShortFollowUp '短时连续接话已关闭。' -CancelCapture }
+                elseif (-not $script:handsFreeEnabled) { $script:notice='短时连续接话已开启；还需开启语音唤醒才会生效。' }
+                else { $script:notice='短时连续接话已开启，下次唤醒交流后生效。' }
+            }
+        })
+    }
     $AutoReadToggle.Add_Click({ [void](Invoke-DesktopPreference @{autoRead=[bool]$AutoReadToggle.IsChecked}) })
     $AutoSendToggle.Add_Click({ [void](Invoke-DesktopPreference @{autoSend=[bool]$AutoSendToggle.IsChecked}) })
     $VoiceCombo.Add_SelectionChanged({ if (-not $script:syncingUi -and $VoiceCombo.SelectedItem) { [void](Invoke-DesktopPreference @{voiceId=[string]$VoiceCombo.SelectedItem.id}) } })
     $RateCombo.Add_SelectionChanged({ if (-not $script:syncingUi -and $RateCombo.SelectedItem) { [void](Invoke-DesktopPreference @{speechRate=[int]$RateCombo.SelectedItem.value}) } })
     $StyleCombo.Add_SelectionChanged({ if (-not $script:syncingUi -and $StyleCombo.SelectedItem) { [void](Invoke-DesktopPreference @{waveStyle=[string]$StyleCombo.SelectedItem.id}) } })
     $SizeSlider.Add_ValueChanged({ if (-not $script:syncingUi) { [void](Invoke-DesktopPreference @{waveSize=[int]$SizeSlider.Value}) } })
-    $DirectoryCombo.Add_SelectionChanged({ if (-not $script:syncingUi) { Reset-ManualTaskBinding '目录筛选已改变，取消上次连接。'; Invalidate-VoiceTaskCreateBinding -Reason '已手动改变目录筛选'; Reset-VoiceTaskSwitch; Update-TaskSelection; Save-Settings } })
+    $DirectoryCombo.Add_SelectionChanged({ if (-not $script:syncingUi) { if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标筛选已改变，连续接话已结束。' -CancelCapture }; Reset-ManualTaskBinding '目录筛选已改变，取消上次连接。'; Invalidate-VoiceTaskCreateBinding -Reason '已手动改变目录筛选'; Reset-VoiceTaskSwitch; Update-TaskSelection; Save-Settings } })
     $RefreshTasksButton.Add_Click({ Refresh-AssistantTasks })
     $TaskCombo.Add_SelectionChanged({
         if (-not $script:syncingUi) {
+            if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标任务选择已改变，连续接话已结束。' -CancelCapture }
             Reset-ManualTaskBinding '选择已改变，取消上次连接；请点击连接所选任务。'
             Invalidate-VoiceTaskCreateBinding -Reason '已手动改变任务选择'
             if ($script:voiceTaskSwitch -and $script:voiceTaskSwitch.Phase -ne 'choosing') { Reset-VoiceTaskSwitch }
         }
     })
-    $InputBox.Add_TextChanged({ Update-TaskBindingInput })
+    $InputBox.Add_TextChanged({
+        Update-TaskBindingInput
+        if ((Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) -and $script:shortFollowUp -and $script:shortFollowUp.Phase -ne 'recognizing') {
+            $expected=($script:shortFollowUp.Phase -eq 'dispatching' -and $script:autoDispatch -and $script:autoDispatch.Text -ceq $InputBox.Text.Trim())
+            if (-not $expected -and ($InputBox.Text.Trim() -or $script:shortFollowUp.Phase -eq 'dispatching')) {
+                Close-ShortFollowUp '草稿已保留，连续接话已结束。' -CancelCapture
+            }
+        }
+    })
     $BindTaskButton.Add_Click({
         if ($TaskCombo.SelectedItem) { [void](Begin-ManualTaskBinding ([string]$TaskCombo.SelectedItem.threadId)) }
         else { $script:notice='请先选择一个本机任务。' }
@@ -261,6 +282,7 @@ function Initialize-DesktopController {
     if ($desktop.Controls.ContainsKey('CenterStopButton')) { $desktop.Controls.CenterStopButton.Add_Click({ Invoke-CenterStop }) }
     $MenuCaptions.Add_Click({ [void](Invoke-DesktopPreference @{captionsVisible=(-not $script:captionsVisible)}) })
     $MenuStop.Add_Click({ Stop-Output '已停止朗读。' })
+    if ($desktop.Controls.ContainsKey('MenuFollowUpEnd')) { $desktop.Controls.MenuFollowUpEnd.Add_Click({ Stop-ShortFollowUpByUser }) }
     $MenuVisibility.Add_Click({ [void](Invoke-DesktopPreference @{floatingVisible=(-not $script:floatingVisible)}) })
     if ($desktop.Controls.ContainsKey('PreviewVoiceButton')) { $desktop.Controls.PreviewVoiceButton.Add_Click({ Stop-Output; Queue-AnswerSpeech '你好，我是声伴。你说，我在听。' }) }
     if ($desktop.Controls.ContainsKey('ReplayButton')) { $desktop.Controls.ReplayButton.Add_Click({ Stop-Output; if ($script:latest) { Queue-AnswerSpeech $script:latest } }) }

@@ -202,6 +202,7 @@ function New-DesktopShell {
     foreach ($entry in @(
         @('MenuPin','始终置顶',$true), @('MenuSettings','打开设置',$false),
         @('MenuCaptions','显示字幕与输入',$true), @('MenuPauseResume','暂停朗读',$false), @('MenuStop','停止朗读',$false),
+        @('MenuFollowUpEnd','结束连续接话',$false),
         @('MenuVisibility','隐藏悬浮声波',$false)
     )) {
         if ($entry[0] -eq 'MenuVisibility') { [void]$menu.Items.Add((New-Object Windows.Controls.Separator)) }

@@ -13,7 +13,7 @@ $failed=New-Object 'Collections.Generic.List[string]'
 $scripts=@('Test-TaskSwitch.ps1','Test-TaskSwitchIntegration.ps1','Test-TaskCreate.ps1',
     'Test-TaskCreateIntegration.ps1','Test-DesktopController.ps1','Test-LocalCommands.ps1',
     'Test-PlaybackCancellation.ps1','Test-HandsFree.ps1','Test-DesktopActions.ps1','Test-VoicePlaybackResume.ps1','Test-StartupSettings.ps1','test_pending_ui.ps1',
-    'Test-Infrastructure.ps1','Test-WakePhraseSettings.ps1','Test-VersionBuild.ps1','Test-AudioOutput.ps1')
+    'Test-Infrastructure.ps1','Test-WakePhraseSettings.ps1','Test-VersionBuild.ps1','Test-AudioOutput.ps1','Test-ShortFollowUpCapture.ps1')
 try {
     foreach ($folder in @('src','tests')) {
         $destination=Join-Path $runPath $folder

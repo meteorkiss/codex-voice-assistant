@@ -1,6 +1,6 @@
 ﻿# v6 测试说明
 
-2026-09-08。以下命令从项目根目录执行，使用 Windows PowerShell 5.1；WPF 测试带 `-STA`。测试样本在 `tests/fixtures`，运行产物写入 `work/tests` 或 `work/desktop-shell-render`。不应使用个人 `data` 作为测试输出目录。
+更新：2026-09-12。以下命令从项目根目录执行，使用 Windows PowerShell 5.1；WPF 测试带 `-STA`。测试样本在 `tests/fixtures`，运行产物写入 `work/tests` 或 `work/desktop-shell-render`。不应使用个人 `data` 作为测试输出目录。
 
 不要把“测试进程能运行”当成声学效果验收。当前已经做过本机组件、界面、任务读取和回声对照测试；真人与答案朗读重叠说话、不同房间和第二台纯净电脑尚未验证。没有公开发布安装包。
 
@@ -18,6 +18,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Test-StartupSettin
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-DesktopController.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-DesktopShell.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-HandsFree.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Test-ShortFollowUpCapture.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-PlaybackCancellation.ps1
 .\runtime\python\python.exe -B tests/test_bridge.py
 .\runtime\python\python.exe -B tests/test_task_matcher.py
@@ -38,7 +39,8 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-TaskSwit
 | `Test-StartupSettings.ps1` | 生产设置初始化：有无 BOM、保存／显式任务优先级、正式／测试／预览模式，以及唤醒偏好恢复 |
 | `Test-DesktopController.ps1` | 已通过 18 场景：首启不能猜任务、选择后显式绑定、目录筛选不改绑定、每任务未知回执锁、绑定失败不混用目标与记录、同任务复用读取位置、六款样式、七种声音、四档语速、隐藏不断读、自动朗读只控制新答案。还在 `work/tests/desktop-controller` 中调用真实 `Save-Settings` 新建和替换文件，覆盖 PowerShell 5.1 的空备份路径处理 |
 | `Test-DesktopShell.ps1` | 六款图形的透明像素与 WPF 命中几何、设置及字幕布局、窗口约束位置、样式尺寸和输入归一化；渲染图在 `work/desktop-shell-render`。PNG 与几何测试不等于穿透其他真实应用的点击测试 |
-| `Test-HandsFree.ps1` | 生产免手状态机、计时器和识别结果处理；覆盖唤醒、回应、问题识别、自动派发、取消、过期结果、资源释放和退出。设备、播放器、ASR 结果及桥接使用替身 |
+| `Test-HandsFree.ps1` | 生产免手状态机、计时器和识别结果处理；覆盖唤醒、回应、问题识别、自动派发、短时连续接话、取消、过期结果、资源释放和退出。设备、播放器、ASR 结果及桥接使用替身 |
+| `Test-ShortFollowUpCapture.ps1` | 一起编译生产 AEC 与唤醒监听 C#，核对连续接话交接 API 和未启动监听时的拒绝行为；不配置 worker、不打开设备 |
 | `Test-PlaybackCancellation.ps1` | 331 项检查：普通桌面操作、外观配置、隐藏窗口和刷新任务不断读；明确停读、录音、发送、换任务及采集状态变化仍执行取消。真实 TaskSwitch 的未找到、多候选、成功绑定反馈在模拟冷 AEC 等待中保留，就绪后只合成一次；外部麦克风与显式停止仍清队列 |
 | `test_bridge.py` | 28 项离线单测：没有默认私人任务；list/find 只读本机索引；包含 WAL；坏索引和未知字段报错；过滤归档、子代理与非本机候选；明确目标及宿主校验；并发去重、未知回执、写账失败和重启后禁止重复发送 |
 | `test_task_matcher.py` | 21 项标题匹配检查：完整/包含/同音优先级、多个候选、至少三个汉字的同音条件、英文数字边界、C++/C# 与版本号、无效查询 |

@@ -10,6 +10,7 @@ function Initialize-AssistantSettings {
             if ($null -ne $settings.autoSend) { $script:autoSend = [bool]$settings.autoSend }
             if ($null -ne $settings.handsFreeEnabled -and -not $TestMode -and -not $PreviewPath) { $script:handsFreeEnabled=[bool]$settings.handsFreeEnabled }
             if ($null -ne $settings.bargeInEnabled) { $script:bargeInEnabled=[bool]$settings.bargeInEnabled }
+            if ($null -ne $settings.shortFollowUpEnabled -and -not $TestMode -and -not $PreviewPath) { $script:shortFollowUpEnabled=[bool]$settings.shortFollowUpEnabled }
             if ($settings.wakePhrase) {
                 $wakeValidation=Get-WakePhraseValidation ([string]$settings.wakePhrase)
                 if ($wakeValidation.Valid) { $script:wakePhrase=$wakeValidation.Phrase }
@@ -28,7 +29,7 @@ function Initialize-AssistantSettings {
 }
 
 function Save-Settings {
-    $preferences=@{version=6;threadId=$script:threadId;voice=$script:voiceId;speechRate=$script:speechRate;autoRead=$script:autoRead;autoSend=$script:autoSend;handsFreeEnabled=$script:handsFreeEnabled;bargeInEnabled=$script:bargeInEnabled;wakePhrase=$script:wakePhrase;waveStyle=$script:waveStyle;waveSize=$script:waveSize;pinned=$script:pinned;captionsVisible=$script:captionsVisible;floatingVisible=$script:floatingVisible;directoryFilter=$script:directoryFilter}
+    $preferences=@{version=7;threadId=$script:threadId;voice=$script:voiceId;speechRate=$script:speechRate;autoRead=$script:autoRead;autoSend=$script:autoSend;handsFreeEnabled=$script:handsFreeEnabled;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;wakePhrase=$script:wakePhrase;waveStyle=$script:waveStyle;waveSize=$script:waveSize;pinned=$script:pinned;captionsVisible=$script:captionsVisible;floatingVisible=$script:floatingVisible;directoryFilter=$script:directoryFilter}
     if ($window -and -not [double]::IsNaN($window.Left) -and -not [double]::IsNaN($window.Top)) { $preferences.left=$window.Left; $preferences.top=$window.Top }
     Write-AtomicJson -Path $settingsPath -Value $preferences -Depth 4
 }

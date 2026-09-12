@@ -55,7 +55,7 @@ function Complete-AssistantSpeech {
             (-not $job.ContainsKey('ThreadId') -or $job.ThreadId -ceq $script:threadId))
         if ($code -eq 0 -and $fresh -and (Test-AssistantAudioPath $audio) -and (Test-Path -LiteralPath $audio -PathType Leaf) -and (Safe-To-Play)) {
             [CodexReader.AudioPlayer]::Play($audio)
-            $script:audioPath=$audio;$script:spoken++
+            $script:audioPath=$audio;$script:lastSpeechEpoch=$script:epoch;$script:spoken++
             return
         }
         if ($code -ne 0) { $script:notice='文字已显示，语音暂时不可用。' }

@@ -29,7 +29,7 @@ $script:saved=New-Object Collections.ArrayList
 $script:results=New-Object Collections.ArrayList
 function Save-Settings {
     if ($script:preferenceSaveFails) { throw 'Simulated preference write failure.' }
-    [void]$script:saved.Add(@{threadId=$script:threadId;cwd=$script:boundDirectory;directoryFilter=$script:directoryFilter;voice=$script:voiceId;rate=$script:speechRate;style=$script:waveStyle;size=$script:waveSize;autoRead=$script:autoRead;bargeInEnabled=$script:bargeInEnabled})
+    [void]$script:saved.Add(@{threadId=$script:threadId;cwd=$script:boundDirectory;directoryFilter=$script:directoryFilter;voice=$script:voiceId;rate=$script:speechRate;style=$script:waveStyle;size=$script:waveSize;autoRead=$script:autoRead;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled})
 }
 function Start-Bridge($Request,[string]$Purpose) { [void]$script:effects.Add(@{action='bridge';purpose=$Purpose;request=$Request.Clone()}); return $true }
 function Stop-Output([string]$Message='') { [void]$script:effects.Add(@{action='stop'}); $script:speechQueue.Clear() }
@@ -65,7 +65,7 @@ $script:threadId=''; $script:boundDirectory=''; $script:directoryFilter=''; $scr
 $script:connected=$false; $script:recMode='idle'; $script:autoRead=$true; $script:autoSend=$false
 $script:pinned=$true; $script:captionsVisible=$false; $script:floatingVisible=$false
 $script:handsFreeEnabled=$false; $script:handsFreePhase='off'; $script:wakePhrase='test'
-$script:bargeInEnabled=$true; $script:fakeEchoReady=$false; $script:wakeListener=[pscustomobject]@{Error=''}
+$script:bargeInEnabled=$true; $script:shortFollowUpEnabled=$false; $script:shortFollowUp=$null; $script:followUpCapture=$false; $script:fakeEchoReady=$false; $script:wakeListener=[pscustomobject]@{Error=''}
 $script:testWindowsShown=$false
 $script:voiceGeneration=0; $script:autoDispatch=$null; $script:pendingSends=@{}; $script:pendingUncertain=''
 $workspace=$projectRoot
@@ -221,6 +221,14 @@ try {
             Assert-That ($EchoStatusLabel.Text -like '音频设备未就绪：*' -and $EchoStatusLabel.Text.Contains($script:wakeListener.Error) -and $EchoStatusLabel.Text -notlike '*已就绪*') 'A device error was hidden behind a stale ready state.'
         } finally { $script:handsFreeEnabled=$oldEnabled; $script:bargeInEnabled=$oldBargeIn; $script:fakeEchoReady=$false; $script:wakeListener.Error='' }
     }
+    Test-Case 'short follow-up opt-in is explicit synchronized and persisted' {
+        Assert-That (-not $script:shortFollowUpEnabled -and -not [bool]$ShortFollowUpToggle.IsChecked) 'Short follow-up was not off by default.'
+        $before=$script:saved.Count; $ShortFollowUpToggle.IsChecked=$true; Invoke-Click $ShortFollowUpToggle
+        Assert-That ($script:shortFollowUpEnabled -and [bool]$ShortFollowUpToggle.IsChecked) 'Short follow-up opt-in did not synchronize.'
+        Assert-That ($script:saved.Count -eq $before+1 -and $script:saved[$script:saved.Count-1].shortFollowUpEnabled) 'Short follow-up opt-in was not persisted once.'
+        $ShortFollowUpToggle.IsChecked=$false; Invoke-Click $ShortFollowUpToggle
+        Assert-That (-not $script:shortFollowUpEnabled -and -not $script:saved[$script:saved.Count-1].shortFollowUpEnabled) 'Short follow-up opt-out was not persisted.'
+    }
     Test-Case 'new answers obey auto-read and enabling does not replay history' {
         $script:autoRead=$false; $before=Count-Effect 'queue'
         $answers=@([pscustomobject]@{Text='new while disabled';UserTurnVersion=1}); . $answerHandler
@@ -297,20 +305,22 @@ try {
         $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-Settings'},$true)
         if (-not $definition) { throw 'Missing production Save-Settings function.' }
         . ([scriptblock]::Create($definition.Extent.Text))
-        $previousRate=$script:speechRate; $previousBargeIn=$script:bargeInEnabled
+        $previousRate=$script:speechRate; $previousBargeIn=$script:bargeInEnabled; $previousFollowUp=$script:shortFollowUpEnabled
         try {
-            $script:bargeInEnabled=$true
+            $script:bargeInEnabled=$true; $script:shortFollowUpEnabled=$true
             Save-Settings
             $created=Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-That ($created.threadId -eq $script:threadId -and $created.voice -eq $script:voiceId) 'Real settings create lost task or voice.'
             Assert-That ($created.bargeInEnabled -is [bool] -and $created.bargeInEnabled) 'Real settings create lost the enabled echo preference.'
-            $script:speechRate=20; $script:bargeInEnabled=$false
+            Assert-That ($created.shortFollowUpEnabled -is [bool] -and $created.shortFollowUpEnabled) 'Real settings create lost the enabled short follow-up preference.'
+            $script:speechRate=20; $script:bargeInEnabled=$false; $script:shortFollowUpEnabled=$false
             Save-Settings
             $replaced=Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-That ($replaced.speechRate -eq 20 -and $replaced.threadId -eq $script:threadId) 'Real settings replace failed to persist preferences.'
             Assert-That ($replaced.bargeInEnabled -is [bool] -and -not $replaced.bargeInEnabled) 'Real settings replacement lost the disabled echo preference.'
+            Assert-That ($replaced.shortFollowUpEnabled -is [bool] -and -not $replaced.shortFollowUpEnabled) 'Real settings replacement lost the disabled short follow-up preference.'
             Assert-That (-not (Test-Path -LiteralPath ($settingsPath+'.tmp'))) 'Successful settings replacement left its temporary file.'
-        } finally { $script:speechRate=$previousRate; $script:bargeInEnabled=$previousBargeIn }
+        } finally { $script:speechRate=$previousRate; $script:bargeInEnabled=$previousBargeIn; $script:shortFollowUpEnabled=$previousFollowUp }
     }
 } finally {
     Close-DesktopShell $desktop

@@ -17,6 +17,125 @@ $script:autoDispatch = $null
 $script:autoSendPrepared = 0
 $script:closing = $false
 $script:bargeInEnabled = $true
+$script:shortFollowUpEnabled = $false
+$script:shortFollowUp = $null
+$script:shortFollowUpGeneration = 0
+$script:followUpCapture = $false
+$script:shortFollowUpWaitSeconds = 6
+$script:shortFollowUpMaxSeconds = 30
+
+function Test-ShortFollowUpTranscript([string]$Text) {
+    $value=if ($null -eq $Text) { '' } else { $Text.Trim() }
+    if (-not $value) { return $false }
+    $meaningful=[regex]::Replace($value,'[^\p{L}\p{Nd}]','')
+    if ($meaningful.Length -lt 2) { return $false }
+    return ($meaningful -notmatch '\A(?:嗯+|啊+|呃+|哦+|喂+|那个|这个|然后|好吧|没事|算了|不用了|等等)\z')
+}
+
+function Close-ShortFollowUp([string]$Message='', [switch]$CancelCapture) {
+    $active=[bool]$script:shortFollowUp
+    $owned=$script:followUpCapture
+    $script:shortFollowUp=$null
+    $script:followUpCapture=$false
+    $script:shortFollowUpGeneration++
+    if ($CancelCapture -and $owned -and $script:recMode -ne 'idle') { Cancel-Recording }
+    if ($Message -and ($active -or $owned)) { $script:notice=$Message }
+}
+
+function Start-ShortFollowUpWait([string]$Source) {
+    if ($Source -notin @('wake','follow-up') -or -not $script:shortFollowUpEnabled -or -not $script:handsFreeEnabled) {
+        Close-ShortFollowUp
+        return
+    }
+    $script:shortFollowUpGeneration++
+    $script:shortFollowUp=@{Generation=$script:shortFollowUpGeneration;Phase='waiting-answer';ThreadId=[string]$script:threadId;
+        StartedUtc=[DateTime]::UtcNow;Deadline=[DateTime]::UtcNow.AddMinutes(5);SpokenBaseline=$script:spoken;PlaybackEpoch=-1}
+}
+
+function Register-ShortFollowUpAnswer {
+    $session=$script:shortFollowUp
+    if (-not $session -or $session.Phase -ne 'waiting-answer' -or $session.ThreadId -cne [string]$script:threadId) { return }
+    if (-not $script:autoRead) { Close-ShortFollowUp; return }
+    $session.Phase='waiting-playback'
+    $session.SpokenBaseline=$script:spoken
+    $session.PlaybackEpoch=-1
+    $session.Deadline=[DateTime]::UtcNow.AddMinutes(2)
+}
+
+function Start-ShortFollowUpCapture([DateTime]$Now) {
+    $session=$script:shortFollowUp
+    if (-not $session -or $session.Phase -ne 'waiting-playback') { return }
+    $session.Phase='preparing'
+    $script:followUpCapture=$true
+    $direct=$false
+    if ((Test-FullDuplexReady) -and $script:wakeListener.PSObject.Methods['BeginFollowUpQuestion']) {
+        try { $direct=[bool]$script:wakeListener.BeginFollowUpQuestion() } catch { $direct=$false }
+    }
+    Begin-Recording $true
+    if ($script:recMode -ne 'arming') {
+        Close-ShortFollowUp '连续接话没有开始，已回到唤醒待机。' -CancelCapture
+        return
+    }
+    $session=$script:shortFollowUp
+    $session.Phase='preparing'
+    $session.ThreadId=[string]$script:threadId
+    $session.VoiceGeneration=$script:voiceGeneration
+    $session.DirectCapture=$direct
+    $session.Deadline=$Now.AddSeconds($script:shortFollowUpWaitSeconds+3)
+    $script:notice='连续接话正在准备；不想继续可点“结束接话”。'
+}
+
+function Update-ShortFollowUp([DateTime]$Now = [DateTime]::UtcNow) {
+    $session=$script:shortFollowUp
+    if (-not $session) { return }
+    if ($script:closing -or -not $script:shortFollowUpEnabled -or -not $script:handsFreeEnabled -or
+        -not $script:connected -or $session.ThreadId -cne [string]$script:threadId -or $script:pendingUncertain) {
+        Close-ShortFollowUp '连续接话已结束。' -CancelCapture
+        return
+    }
+    if (Test-ExternalCapture) {
+        Close-ShortFollowUp '其他应用正在使用麦克风，连续接话已结束。' -CancelCapture
+        return
+    }
+    if ($InputBox.Text.Trim() -and $session.Phase -notin @('dispatching','recognizing')) {
+        Close-ShortFollowUp '草稿已保留，连续接话已结束。' -CancelCapture
+        return
+    }
+    if ($Now -ge $session.Deadline) {
+        Close-ShortFollowUp '连续接话等待已超时，已回到唤醒待机。' -CancelCapture
+        return
+    }
+    if ($session.Phase -eq 'waiting-playback') {
+        $state=[CodexReader.AudioPlayer]::State
+        if ($script:spoken -gt $session.SpokenBaseline) {
+            if ([int]$session.PlaybackEpoch -lt 0) { $session.PlaybackEpoch=$script:lastSpeechEpoch }
+        }
+        if ([int]$session.PlaybackEpoch -ge 0 -and $script:epoch -ne $session.PlaybackEpoch) {
+            Close-ShortFollowUp '回答朗读已中断，连续接话未开启。'
+            return
+        }
+        if ([int]$session.PlaybackEpoch -lt 0 -and $state -notin @('playing','paused') -and -not $script:ttsJob -and $script:speechQueue.Count -eq 0) {
+            Close-ShortFollowUp '回答未能朗读，连续接话未开启。'
+            return
+        }
+        if ([int]$session.PlaybackEpoch -ge 0 -and $state -notin @('playing','paused') -and -not $script:ttsJob -and $script:speechQueue.Count -eq 0) {
+            Start-ShortFollowUpCapture $Now
+        }
+    } elseif ($session.Phase -eq 'preparing' -and $script:recMode -eq 'listening') {
+        $session.Phase='listening'
+        $session.Deadline=$script:recorder.StartedUtc.AddSeconds($script:shortFollowUpWaitSeconds)
+        $script:notice='连续接话 · 正在听；不想继续可点“结束接话”。'
+    } elseif ($session.Phase -eq 'preparing' -and $script:recMode -notin @('arming','listening')) {
+        Close-ShortFollowUp '连续接话没有开始，已回到唤醒待机。'
+    } elseif ($session.Phase -eq 'listening' -and $script:recMode -in @('stopping','transcribing')) {
+        $session.Phase='recognizing'
+        $session.Deadline=$Now.AddMinutes(1)
+    }
+}
+
+function Stop-ShortFollowUpByUser {
+    Close-ShortFollowUp '已结束连续接话，仍可用唤醒词开始下一次。' -CancelCapture
+}
 
 function Test-ExternalCapture {
     if (-not $script:mic.Ready -or $script:mic.LastError) { return $true }
@@ -41,6 +160,7 @@ function Set-HandsFree([bool]$Enabled) {
     $script:voiceGeneration++
     $script:autoDispatch = $null
     if (-not $Enabled) {
+        Close-ShortFollowUp -CancelCapture
         Suspend-WakeListener
         if ($script:handsFreeCapture) { Cancel-Recording }
         if ($script:handsFreePhase -in @('releasing','answering-wake','acknowledging')) { Stop-Output }
@@ -96,7 +216,10 @@ function Try-AutoDispatch {
         $script:autoDispatch=$null; return
     }
     if ($script:recMode -ne 'idle') { return }
-    if (Try-LocalAssistantCommand $intent.Text) { return }
+    if (Try-LocalAssistantCommand $intent.Text) {
+        if ($intent.VoiceSource) { Close-ShortFollowUp }
+        return
+    }
     if ($script:pendingUncertain) {
         $script:autoDispatch=$null
         $script:notice='上次发送待核对，已保留这次文字，不会自动重发。'
@@ -109,7 +232,7 @@ function Try-AutoDispatch {
     # Only an undispatched intent may wait. Once attempted, never auto-retry.
     $script:autoDispatch=$null
     $script:autoSendPrepared++
-    Send-Text
+    Send-Text ([string]$intent.VoiceSource)
 }
 
 function Update-HandsFree([DateTime]$Now = [DateTime]::UtcNow) {

@@ -9,7 +9,7 @@ function Set-AssistantPreferences([hashtable]$Values) {
             'speechRate' { if ($value -isnot [int] -or $value -notin @(-20,0,20,50)) { throw '这个语速暂时不可用。' } }
             'waveStyle' { if ($value -isnot [string] -or $value -notin @('rays','halo','particles','minimal','bars','flow')) { throw '这个样式暂时不可用。' } }
             'waveSize' { if ($value -isnot [int] -or $value -lt 180 -or $value -gt 360) { throw '声波尺寸必须在 180 到 360 之间。' } }
-            { $_ -in @('pinned','captionsVisible','floatingVisible','autoRead','autoSend') } {
+            { $_ -in @('pinned','captionsVisible','floatingVisible','autoRead','autoSend','shortFollowUpEnabled') } {
                 if ($value -isnot [bool]) { throw '设置开关必须是真或假。' }
             }
             default { throw '暂不支持这个设置。' }

@@ -199,7 +199,7 @@ function Begin-Transcription([string]$WavePath,[bool]$SendAfter) {
     $path=Join-Path $fixtureRoot ([Guid]::NewGuid().ToString('N')+'.asr.json')
     @{ok=$script:asrSucceeds;text=$script:nextTranscript} | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding UTF8
     $script:fixtureFiles.Add($path)
-    $script:asrJob=@{Process=[pscustomobject]@{HasExited=$true;ExitCode=$(if($script:asrSucceeds){0}else{1})};Output=$path;Files=@($path,$WavePath);Generation=$script:voiceGeneration;ThreadId=$script:threadId;SendAfter=$SendAfter;Prefix=$script:recordPrefix;FromWake=$script:handsFreeCapture}
+    $script:asrJob=@{Process=[pscustomobject]@{HasExited=$true;ExitCode=$(if($script:asrSucceeds){0}else{1})};Output=$path;Files=@($path,$WavePath);Generation=$script:voiceGeneration;ThreadId=$script:threadId;SendAfter=$SendAfter;Prefix=$script:recordPrefix;FromWake=$script:handsFreeCapture;FromFollowUp=$script:followUpCapture}
     $script:recMode='transcribing'
     Add-Trace 'asr:started'
 }
@@ -225,7 +225,7 @@ function Reset-Case {
     $script:manualRecorder=$null; $script:echoQuestionCapture=$false; $script:bargeInEnabled=$false
     $script:ttsJob=$null; $script:asrJob=$null; $script:bridgeJob=$null
     $script:speechQueue=New-Object 'System.Collections.Generic.Queue[string]'
-    $script:audioPath=''; $script:epoch=0; $script:ttsEpoch=-1
+    $script:audioPath=''; $script:epoch=0; $script:ttsEpoch=-1; $script:lastSpeechEpoch=-1
     $script:lastMicVersion=0L; $script:lastUserVersion=0; $script:interrupted=0
     $script:lastTailRead=[DateTime]::UtcNow; $script:lastPendingCheck=[DateTime]::UtcNow
     $script:lastStatusWrite=[DateTime]::MinValue; $script:tail=@{UserTurnVersion=0;Latest='Previous answer'}
@@ -281,6 +281,22 @@ function Finish-QuestionAfterSpeech {
     Assert-That ($script:recMode -eq 'stopping' -and $script:recorder.IsStopping) 'Two seconds of silence after speech did not stop capture.'
     $script:recorder.Release()
     Tick-And-AssertHealthy
+}
+function Open-ShortFollowUpCapture {
+    $script:shortFollowUpEnabled=$true
+    Start-ShortFollowUpWait 'wake'
+    Register-ShortFollowUpAnswer
+    Assert-That ($script:shortFollowUp.Phase -eq 'waiting-playback') 'Eligible wake turn did not wait for answer playback.'
+    $script:spoken++
+    $script:lastSpeechEpoch=$script:epoch
+    [CodexReader.AudioPlayer]::State='playing'
+    Update-ShortFollowUp ([DateTime]::UtcNow)
+    [CodexReader.AudioPlayer]::Finish()
+    Update-ShortFollowUp ([DateTime]::UtcNow)
+    Assert-That ($script:shortFollowUp.Phase -eq 'preparing' -and $script:recMode -eq 'arming' -and $script:followUpCapture) 'Natural answer completion did not prepare a follow-up capture.'
+    $script:wakeListener.Release(); $script:armDue=[DateTime]::UtcNow.AddMilliseconds(-1)
+    Tick-And-AssertHealthy
+    Assert-That ($script:shortFollowUp.Phase -eq 'listening' -and $script:recMode -eq 'listening') 'Follow-up window did not become visibly active after microphone handoff.'
 }
 
 try {
@@ -364,6 +380,57 @@ try {
     $script:nextWakeUtc=[DateTime]::UtcNow.AddMilliseconds(-1)
     Update-HandsFree ([DateTime]::UtcNow)
     Assert-That ($script:wakeListener.IsListening -and $script:wakeCount -eq 1) 'Answer completion did not return to fresh wake standby.'
+
+    # Optional short follow-up is off by default and begins only after natural
+    # playback completion of an explicitly woken turn.
+    Reset-Case; Start-WakeCase
+    Start-ShortFollowUpWait 'wake'
+    Assert-That (-not $script:shortFollowUp) 'Default-off follow-up unexpectedly armed a microphone window.'
+
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-ShortFollowUpWait 'wake'; Register-ShortFollowUpAnswer
+    $script:spoken++; $script:lastSpeechEpoch=$script:epoch; [CodexReader.AudioPlayer]::State='closed'
+    Update-ShortFollowUp ([DateTime]::UtcNow)
+    Assert-That ($script:shortFollowUp.Phase -eq 'preparing' -and $script:recMode -eq 'arming') 'An answer that finished between polls did not open the follow-up handoff.'
+
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-ShortFollowUpWait 'wake'; Register-ShortFollowUpAnswer
+    [CodexReader.AudioPlayer]::State='closed'; Update-ShortFollowUp ([DateTime]::UtcNow)
+    Assert-That (-not $script:shortFollowUp -and $script:recMode -eq 'idle') 'Failed answer speech left a dormant follow-up window armed.'
+
+    Reset-Case; Start-WakeCase; $script:shortFollowUpEnabled=$true; Start-ShortFollowUpWait 'wake'; Register-ShortFollowUpAnswer
+    $script:spoken++; $script:lastSpeechEpoch=$script:epoch; [CodexReader.AudioPlayer]::State='playing'; Update-ShortFollowUp ([DateTime]::UtcNow)
+    Stop-Output; Update-ShortFollowUp ([DateTime]::UtcNow)
+    Assert-That (-not $script:shortFollowUp -and $script:recMode -eq 'idle') 'Explicitly interrupted answer playback opened a follow-up window.'
+
+    Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+    $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-7)
+    Tick-And-AssertHealthy
+    Assert-That (-not $script:shortFollowUp -and -not $script:followUpCapture -and $script:recMode -eq 'idle' -and $script:recorder.Cancels -eq 1) 'Idle follow-up timeout did not cancel exactly its own capture.'
+
+    Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+    $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-31); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow
+    Tick-And-AssertHealthy
+    Assert-That ($script:recMode -eq 'stopping' -and $script:shortFollowUp.Phase -eq 'recognizing') 'Thirty-second follow-up limit did not preserve the sentence for transcription.'
+
+    Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+    $script:nextTranscript='嗯'; $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-5); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow.AddSeconds(-2.2)
+    Tick-And-AssertHealthy; $script:recorder.Release(); Tick-And-AssertHealthy
+    Assert-That ($InputBox.Text -eq '嗯' -and -not $script:shortFollowUp -and $script:bridgeRequests.Count -eq 0) 'Ambiguous follow-up was not retained as an unsent draft.'
+
+    Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+    $script:nextTranscript='请继续解释第二种方法'; $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-5); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow.AddSeconds(-2.2)
+    Tick-And-AssertHealthy; $script:recorder.Release(); $script:TestMode=$false; Tick-And-AssertHealthy
+    Assert-That ($script:bridgeRequests.Count -eq 1 -and $script:bridgeRequests[0].threadId -eq $script:threadId -and $script:bridgeRequests[0].text -eq '请继续解释第二种方法') 'Clear follow-up did not dispatch once to its captured task.'
+
+    foreach($ending in @('draft','target','external','user')) {
+        Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+        switch($ending) {
+            'draft' {$InputBox.Text='用户开始编辑';Update-ShortFollowUp ([DateTime]::UtcNow)}
+            'target' {$script:threadId='22222222-2222-4222-8222-222222222222';Update-ShortFollowUp ([DateTime]::UtcNow)}
+            'external' {$script:externalCapture=$true;Set-FakeCaptureSnapshot;Update-ShortFollowUp ([DateTime]::UtcNow)}
+            'user' {Stop-ShortFollowUpByUser}
+        }
+        Assert-That (-not $script:shortFollowUp -and -not $script:followUpCapture -and $script:recMode -eq 'idle') ('Follow-up ending did not close safely: '+$ending)
+    }
 
     # No-speech and empty-ASR paths never dispatch anything.
     Reset-Case; Start-WakeCase; Activate-And-ReleaseWake; Finish-AckAndStartQuestion
