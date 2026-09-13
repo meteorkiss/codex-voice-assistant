@@ -3,13 +3,15 @@
 Matching precedence is normalized full title, literal title substring, explicit
 keyword intersection, a version-qualified known product alias, then an exact
 window of Mandarin syllables (tones ignored).
-No edit distance, initials, word dropping, title-summary search, or task switching
-is performed here. A bare two-part version can omit only the zero major version.
+Approximate results are suggestions requiring confirmation, never binding
+decisions. No initials, word dropping or title-summary search is performed.
+A bare two-part version can omit only the zero major version.
 """
 from __future__ import annotations
 
 import unicodedata
 import re
+from difflib import SequenceMatcher
 
 MAX_QUERY_LENGTH = 200
 MAX_CANDIDATES = 5
@@ -104,7 +106,7 @@ def version_matches(query_version, title_version):
 def keyword_terms(query):
     """Split only explicit whitespace and numeric version boundaries.
 
-    Keep words within each fragment intact. In particular, a short Han fragment
+    Split Han/Latin script boundaries without segmenting Chinese words. A short Han fragment
     does not gain phonetic guessing merely because it appears with another word.
     Spacing inside a spoken version (v 0 . 6 . 17) remains insignificant.
     """
@@ -117,12 +119,51 @@ def keyword_terms(query):
         start = 0
         for match in VERSION_TOKEN.finditer(normalized):
             if match.start() > start:
-                terms.append((normalized[start:match.start()], False))
+                terms.extend((word, False) for word in script_terms(normalized[start:match.start()]))
             terms.append((match.group(), True))
             start = match.end()
         if start < len(normalized):
-            terms.append((normalized[start:], False))
+            terms.extend((word, False) for word in script_terms(normalized[start:]))
     return terms
+
+
+def script_terms(text):
+    # Retain punctuation/digits attached to Latin names (C++, C#, GPT4).
+    return re.findall(r'[a-z0-9+#.]+|[^a-z0-9+#.]+', text)
+
+
+def approximate_keywords(terms, title, title_versions):
+    """Conservative local candidate recall; every keyword must be explained.
+
+    Only ASCII words of at least four letters allow small spelling deviations.
+    Chinese homophones need three Han characters; short words stay literal.
+    Numeric tokens are never fuzzy. Similarity is not a probability.
+    """
+    title_words = [word for word, is_version in keyword_terms(title) if not is_version]
+    normalized = normalize_title(title)
+    scores = []
+    for word, is_version in terms:
+        if is_version:
+            if not any(version_matches(word, item) for item in title_versions):
+                return None
+            scores.append(1.0)
+        elif word in normalized:
+            scores.append(1.0)
+        elif re.fullmatch(r'[a-z]{4,}', word):
+            options = [SequenceMatcher(None, word, other, autojunk=False).ratio()
+                       for other in title_words if re.fullmatch(r'[a-z]{4,}', other)
+                       and abs(len(word) - len(other)) <= 2]
+            best = max(options, default=0.0)
+            if best < 0.8:
+                return None
+            scores.append(best)
+        elif len(word) >= MIN_PHONETIC_HAN and all(is_han(char) for char in word):
+            if not contains_window(phonetic_units(normalized), phonetic_units(word)):
+                return None
+            scores.append(0.9)
+        else:
+            return None
+    return sum(scores) / len(scores) if scores else None
 
 
 def keywords_match(terms, title, title_versions):
@@ -192,7 +233,16 @@ def match_tasks(query, threads):
         matches = [thread for thread, title, _ in titled
                    if len(title) >= len(normalized) and
                    contains_window(phonetic_units(title), needle)]
+    if not matches:
+        method = 'approximate_keywords'
+        ranked = []
+        for order, (thread, _, title_versions) in enumerate(titled):
+            score = approximate_keywords(terms, thread['title'], title_versions)
+            if score is not None:
+                ranked.append((-score, order, thread))
+        matches = [thread for _, _, thread in sorted(ranked, key=lambda item: item[:2])]
     total = len(matches)
     return {'query': query, 'matchType': 'unique' if total == 1 else 'ambiguous' if total else 'none',
             'matchMethod': method if total else 'none', 'threads': matches[:MAX_CANDIDATES],
-            'totalMatches': total}
+            'totalMatches': total,
+            'requiresConfirmation': bool(total and method in ('known_alias', 'phonetic', 'approximate_keywords'))}

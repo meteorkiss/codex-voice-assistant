@@ -98,6 +98,24 @@ foreach($entry in @(
 # The reported object-first utterances must be consumed locally. In particular
 # 6.117 is not corrected to 6.17 here; strict lookup decides whether it exists.
 foreach($entry in @(
+ @('把任务切换到排查codedex任务里','排查codedex'),
+ @('把任务切换到排查code这个任务里','排查code'),
+ @('切换到高斯泼溅那个对话里面','高斯泼溅'),
+ @('把对话切到声伴 6.17 这个任务里边','声伴 6.17')
+)) { Assert-Command $entry[0] 'switchTask' $entry[1] }
+foreach($text in @('把任务切到这个任务里','把任务切到排查任务里面然后新建任务','不要把任务切到排查任务里')) { Assert-Routed $text }
+foreach($text in @('对','是的','没错','确认切换')) {
+ Assert-Routed $text
+ if((Get-AssistantTaskSelectionReply $text $true).Value -ne 1){throw 'Single suggestion confirmation failed.'};$checks++
+ if((Get-AssistantTaskSelectionReply $text $false).Value -ne 0){throw 'Generic yes guessed a multiple-choice candidate.'};$checks++
+}
+foreach($text in @('不是','不对','不是这个','都不是')) {
+ if((Get-AssistantTaskSelectionReply $text $true).Action -ne 'cancelTaskSwitch'){throw 'Negative confirmation failed.'};$checks++
+}
+foreach($text in @('是的吗','不是这个意思','对，然后发消息','“是的”',"是的`n发送")) {
+ if($null -ne (Get-AssistantTaskSelectionReply $text $true)){throw 'A discussion or composite answer was consumed as confirmation.'};$checks++
+}
+foreach($entry in @(
  @('把任务切到这个申办0.6.17。','申办0.6.17'),
  @('把任务切到6.117。','6.117'),
  @('把任务切到声伴0.6.17','声伴0.6.17'),

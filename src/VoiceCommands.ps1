@@ -1,6 +1,19 @@
 ﻿# Pure, deliberately narrow parsing. The caller owns all settings and side effects.
 . (Join-Path $PSScriptRoot 'DesktopActionCommands.ps1')
 
+# This parser must only be called inside a live local task-selection context.
+function Get-AssistantTaskSelectionReply {
+    param([string]$Text,[bool]$SingleCandidate=$false)
+    $reply=[regex]::Replace($Text.Trim(),'[。.!！]+\z','').Trim()
+    if ($reply -match '\A(?:不是|不对|不要|取消|取消切换|都不是|不是这个)\z') {
+        return [pscustomobject]@{Action='cancelTaskSwitch';Value=$true}
+    }
+    if ($reply -match '\A(?:对|对的|是|是的|没错|就是这个|确认|确认切换)\z') {
+        return [pscustomobject]@{Action='chooseTask';Value=$(if($SingleCandidate){1}else{0})}
+    }
+    return $null
+}
+
 function Get-AssistantVoiceCommand {
     param([AllowNull()][AllowEmptyString()][string]$Text)
 
@@ -150,6 +163,11 @@ function Get-AssistantTaskVoiceCommand {
     if ($candidate -ceq '连接刚才的新任务') { return [pscustomobject]@{Action='resumeCreatedTask';Value=$true} }
     if ($candidate -ceq '放弃连接新任务') { return [pscustomobject]@{Action='cancelCreatedTaskConnection';Value=$true} }
     $switchVerb='(?:切换到|切换刀|切到|切刀)'
+    # A locative task suffix belongs to the command, not the searched name.
+    # Require an explicit switch verb and a concrete target before removing it.
+    if ($candidate -match ('\A(?:把\s*(?:任务|对话|聊天(?:内容)?)\s*)?'+$switchVerb)) {
+        $candidate=[regex]::Replace($candidate,'(?:的这个|这个|那个|的)?(?:任务|对话|聊天(?:内容)?)(?:里面|里边|里|中)\z','这个任务')
+    }
     # Spoken object-first requests are explicitly about task binding, so they
     # do not need the trailing task noun or the bare-title settings fallback.
     # Keep the target's spelling/version exactly as heard; lookup owns failure.

@@ -10,8 +10,17 @@ function Complete-LocalCommandInput([string]$Text,[string]$OriginalInput,$Origin
 }
 function Try-LocalAssistantCommand([string]$Text) {
     if ($script:closing -or $script:recMode -ne 'idle') { return $false }
-    $command=Get-AssistantVoiceCommand $Text
-    if (-not $command) { return $false }
+    $command=$null
+    if ((Get-Command Test-VoiceTaskSelectionPending -ErrorAction SilentlyContinue) -and (Test-VoiceTaskSelectionPending)) {
+        $command=Get-AssistantTaskSelectionReply $Text ($script:voiceTaskSwitch.Candidates.Count -eq 1)
+    }
+    if (-not $command) { $command=Get-AssistantVoiceCommand $Text }
+    if (-not $command) {
+        # A new ordinary utterance changes the subject. A later generic "yes"
+        # must not still confirm the previous task suggestion.
+        if ($Text.Trim() -and (Get-Command Test-VoiceTaskSelectionPending -ErrorAction SilentlyContinue) -and (Test-VoiceTaskSelectionPending)) { Reset-VoiceTaskSwitch }
+        return $false
+    }
     if ($command.Action -in @('desktopAction','playback')) {
         $originalInput=[string]$InputBox.Text
         $originalDispatch=$script:autoDispatch

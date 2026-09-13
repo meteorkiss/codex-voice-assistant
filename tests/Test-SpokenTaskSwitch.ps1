@@ -85,6 +85,7 @@ function Reset-SpokenSwitchCase {
     $script:localCommandCount=0;$script:localCommandMessage='';$script:localCommandNoticeUntil=[DateTime]::MinValue
     $script:voiceTaskSwitchGeneration=0;$script:boundDirectory='C:\synthetic-project'
     $script:tasksLoaded=$true;$script:taskCandidates=@();$script:taskCreatePhase='';$script:selectionShown=0
+    $script:fixtureTargetTitle='声伴 v0.6.17 · 短时连续接话'
     $script:settingsWarning='';$script:workerWarning='';$script:recoveryDraftError=''
     $script:voiceTaskCreateSession='synthetic-session';$script:voiceTaskCreatePath=Join-Path $fixtureRoot 'synthetic-create.json'
     $script:fixtureFiles.Add($script:voiceTaskCreatePath)
@@ -111,7 +112,7 @@ function Assert-NoOrdinarySend {
     Assert-That (@($script:bridgeRequests | Where-Object {$_.action -eq 'send'}).Count -eq 0) 'A task command fell through into an ordinary chat send.'
 }
 function Get-SyntheticCandidates([switch]$Ambiguous) {
-    $items=@([pscustomobject]@{threadId=$targetId;title='声伴 v0.6.17 · 短时连续接话'},[pscustomobject]@{threadId=$sourceId;title='语音助手 MVP'})
+    $items=@([pscustomobject]@{threadId=$targetId;title=$script:fixtureTargetTitle},[pscustomobject]@{threadId=$sourceId;title='语音助手 MVP'})
     if($Ambiguous){$items+=([pscustomobject]@{threadId=$thirdId;title='声伴 v0.6.17 · 合成候选乙'})}
     return $items
 }
@@ -137,7 +138,7 @@ function Complete-PureMatcher([switch]$Ambiguous) {
 }
 function Complete-TargetRead {
     Assert-That ($script:bridgeJob.Purpose -eq 'voice-bind' -and $script:bridgeJob.Request.threadId -ceq $targetId) 'Unique lookup did not request live validation of the synthetic target.'
-    Complete-SyntheticJob ([pscustomobject]@{ok=$true;threadId=$targetId;title='声伴 v0.6.17 · 短时连续接话';cwd='C:\synthetic-target';rolloutPath=$targetPath;status='idle';archived=$false;bindingState='active';hostId='local'})
+    Complete-SyntheticJob ([pscustomobject]@{ok=$true;threadId=$targetId;title=$script:fixtureTargetTitle;cwd='C:\synthetic-target';rolloutPath=$targetPath;status='idle';archived=$false;bindingState='active';hostId='local'})
     Assert-That ($script:connected -and $script:threadId -ceq $targetId -and $script:savedBinding -ceq $targetId -and $script:bindingAvailability -eq 'active') 'Validated target was not committed and persisted by the production binding path.'
 }
 function Finish-SyntheticFeedback {
@@ -155,6 +156,9 @@ try {
         Assert-That ($script:localCommandCount -eq 1 -and $script:bridgeRequests[0].query -ceq '申办0.6.17' -and -not $InputBox.Text) 'Reported object-first command was not consumed with its exact query.'
         $match=Complete-PureMatcher
         Assert-That ($match.matchType -eq 'unique' -and $match.matchMethod -eq 'known_alias' -and $script:threadId -ceq $sourceId) 'Known alias did not uniquely match, or switched before live read.'
+        Assert-That ($script:voiceTaskSwitch.Phase -eq 'choosing' -and -not $script:bridgeJob) 'Approximate alias started a read without confirmation.'
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '是的。'
         Complete-TargetRead
         Assert-NoOrdinarySend
     }
@@ -213,6 +217,58 @@ try {
         [void](Complete-PureMatcher)
         Complete-SyntheticJob ([pscustomobject]@{ok=$false;error=[pscustomobject]@{message='Synthetic target read failure'}})
         Assert-That ($script:threadId -ceq $sourceId -and -not $script:voiceTaskSwitch -and $script:localCommandMessage.Contains('无法读取')) 'Target read failure changed the destination or lacked local feedback.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Reported mixed-script spelling and locative suffix ask before binding' {
+        $script:fixtureTargetTitle='排查 Codex 重试与归档对话'
+        Speak-SyntheticUtterance '把任务切换到排查codedex任务里。'
+        $match=Complete-PureMatcher
+        Assert-That ($match.requiresConfirmation -and $match.query -ceq '排查codedex' -and $script:voiceTaskSwitch.Phase -eq 'choosing' -and -not $script:bridgeJob) 'Misspelled title did not ask for confirmation.'
+        Assert-That ($script:localCommandMessage.Contains($script:fixtureTargetTitle)) 'Confirmation did not name the actual candidate.'
+        Assert-NoOrdinarySend
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '对。'
+        Complete-TargetRead
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Negative response cancels suggestion and preserves the original destination' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        [void](Complete-PureMatcher)
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '不是。'
+        Assert-That (-not $script:voiceTaskSwitch -and -not $script:bridgeJob -and $script:threadId -ceq $sourceId -and -not $InputBox.Text) 'Negative response did not cancel locally.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Generic yes cannot choose between multiple tasks' {
+        Speak-SyntheticUtterance '把任务切到6.17。'
+        [void](Complete-PureMatcher -Ambiguous)
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '是的。'
+        Assert-That ($script:voiceTaskSwitch.Phase -eq 'choosing' -and -not $script:bridgeJob -and $script:threadId -ceq $sourceId) 'Generic yes guessed one of several targets.'
+        Assert-NoOrdinarySend
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '选择第一个。'
+        Complete-TargetRead
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Confirmation outside its source and deadline cannot bind a stale candidate' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        [void](Complete-PureMatcher)
+        $script:voiceTaskSwitch.ExpiresAt=[DateTime]::UtcNow.AddSeconds(-1)
+        Assert-That (-not (Try-LocalAssistantCommand '是的')) 'Expired suggestion still accepted confirmation.'
+        Assert-That (-not $script:bridgeJob -and $script:threadId -ceq $sourceId) 'Expired confirmation changed the destination.'
+        $script:voiceTaskSwitch.ExpiresAt=[DateTime]::UtcNow.AddSeconds(30)
+        $script:threadId=$thirdId
+        Assert-That (-not (Try-LocalAssistantCommand '对')) 'A confirmation from another source was accepted.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Changing the subject revokes the suggestion and retains the new draft' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        [void](Complete-PureMatcher)
+        $InputBox.Text='先解释一下这段代码'
+        Assert-That (-not (Try-LocalAssistantCommand $InputBox.Text)) 'Ordinary text was consumed as a choice.'
+        Assert-That (-not $script:voiceTaskSwitch -and $InputBox.Text -ceq '先解释一下这段代码' -and $script:threadId -ceq $sourceId) 'New topic lost its draft or left a stale suggestion.'
+        Assert-That (-not (Try-LocalAssistantCommand '是的')) 'A later generic yes confirmed an obsolete suggestion.'
         Assert-NoOrdinarySend
     }
     $failed=@($script:results | Where-Object {-not $_.passed})

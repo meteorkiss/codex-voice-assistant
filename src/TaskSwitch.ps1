@@ -160,12 +160,15 @@ function Complete-VoiceTaskSearch {
         Set-VoiceTaskSwitchNotice ('没有找到与“'+[string]$pending.Query+'”匹配的任务，未切换。请重说任务名称，或在设置里选择。') $true
         return $true
     }
-    if ($Result.matchType -eq 'unique' -and $candidates.Count -eq 1) {
+    $needsConfirmation=($Result.requiresConfirmation -or $Result.matchMethod -in @('known_alias','phonetic','approximate_keywords'))
+    if ($Result.matchType -eq 'unique' -and $candidates.Count -eq 1 -and -not $needsConfirmation) {
         $pending.Candidates=$candidates
         Start-VoiceTaskBind $candidates[0]
         return $true
     }
-    if ($Result.matchType -ne 'ambiguous' -or $candidates.Count -lt 2 -or $candidates.Count -gt 5) {
+    $validChoice=(($Result.matchType -eq 'ambiguous' -and $candidates.Count -ge 2 -and $candidates.Count -le 5) -or
+        ($Result.matchType -eq 'unique' -and $candidates.Count -eq 1 -and $needsConfirmation))
+    if (-not $validChoice) {
         [void](Fail-VoiceTaskSwitch '任务匹配结果不完整，请重试。'); return $false
     }
     $pending.Phase='choosing'; $pending.Candidates=$candidates; $pending.ExpiresAt=[DateTime]::UtcNow.AddSeconds(90)
@@ -182,8 +185,12 @@ function Complete-VoiceTaskSearch {
     # Showing the existing window directly avoids refreshing/re-filtering this
     # exact numbered list. Original titles remain untouched in its native combo.
     if ($desktop) { Set-DesktopSettingsPage $desktop 0; Show-DesktopSettings $desktop }
+    if ($candidates.Count -eq 1) {
+        Set-VoiceTaskSwitchNotice ('你是要切到“'+[string]$candidates[0].title+'”吗？请唤醒后说“是的”或“不是”，也可以在设置里选择。') $true 90
+        return $true
+    }
     $parts=New-Object 'Collections.Generic.List[string]'
-    [void]$parts.Add('找到多个任务。')
+    [void]$parts.Add($(if($needsConfirmation){'找到几个相近的任务，尚未切换。'}else{'找到多个任务。'}))
     $numbers=@('第一个','第二个','第三个','第四个','第五个')
     for ($i=0;$i -lt $candidates.Count;$i++) {
         $title=[string]$candidates[$i].title

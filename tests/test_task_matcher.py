@@ -17,6 +17,53 @@ def task(title, **extra):
 
 
 class TitleMatchingTests(unittest.TestCase):
+    def test_local_spelling_suggestion_never_auto_binds(self):
+        expected = task('排查 Codex 重试与归档对话')
+        for query in ('排查codedex', 'codedex 排查', '排查 codedex'):
+            out = matcher.match_tasks(query, [expected, task('声伴 v0.6.17')])
+            self.assertEqual(out['threads'], [expected])
+            self.assertEqual(out['query'], query)
+            self.assertEqual(out['matchMethod'], 'approximate_keywords')
+            self.assertTrue(out['requiresConfirmation'])
+
+    def test_literal_keywords_are_direct_even_across_scripts(self):
+        expected = task('Codex 重试 排查')
+        for query in ('排查Codex', '排查 Codex', 'Codex 排查'):
+            out = matcher.match_tasks(query, [expected])
+            self.assertEqual(out['threads'], [expected])
+            self.assertFalse(out['requiresConfirmation'])
+
+    def test_alias_and_phonetic_always_require_confirmation(self):
+        for query, title in (('申办6.17', '声伴 v0.6.17'), ('高斯坡建', '高斯泼溅')):
+            out = matcher.match_tasks(query, [task(title)])
+            self.assertEqual(out['matchType'], 'unique')
+            self.assertTrue(out['requiresConfirmation'])
+
+    def test_approximate_results_keep_all_candidates_not_only_top_one(self):
+        rows = [task('排查 Codex 方案一'), task('排查 Codex 方案二')]
+        out = matcher.match_tasks('排查codedex', rows)
+        self.assertEqual(out['threads'], rows)
+        self.assertEqual(out['matchType'], 'ambiguous')
+        self.assertTrue(out['requiresConfirmation'])
+
+    def test_approximate_never_drops_keywords_or_corrects_numbers(self):
+        rows = [task('排查 Codex v0.6.17')]
+        for query in ('排查codedex 不存在', '排查codedex 6.117', '排查codedex 617',
+                      '排查cop 6.17', '排查GPT4', '不存在 codedex'):
+            self.assertEqual(matcher.match_tasks(query, rows)['matchType'], 'none', query)
+
+    def test_literal_target_wins_over_spelling_suggestions(self):
+        expected = task('排查 codedex')
+        out = matcher.match_tasks('排查codedex', [task('排查 Codex'), expected])
+        self.assertEqual(out['threads'], [expected])
+        self.assertFalse(out['requiresConfirmation'])
+
+    def test_phonetic_keyword_intersection_preserves_other_terms(self):
+        expected = task('高斯泼溅 · 性能优化')
+        out = matcher.match_tasks('高斯坡建 性能', [expected, task('高斯泼溅 安装')])
+        self.assertEqual(out['threads'], [expected])
+        self.assertTrue(out['requiresConfirmation'])
+
     def test_exact_title_takes_precedence_over_longer_title(self):
         exact = task('声波设置')
         out = matcher.match_tasks('声波设置', [task('声波设置的测试'), exact])
