@@ -44,7 +44,7 @@ function Get-ControllerCallback([string]$Variable,[string]$Event){
     $source=$node.Arguments[0].ScriptBlock.Extent.Text
     return [scriptblock]::Create($source.Substring(1,$source.Length-2))
 }
-$manualBind=Get-ControllerCallback 'BindTaskButton' 'Add_Click'
+$selectionChanged=Get-ControllerCallback 'TaskCombo' 'Add_SelectionChanged'
 $directoryChanged=Get-ControllerCallback 'DirectoryCombo' 'Add_SelectionChanged'
 $refreshClicked=Get-ControllerCallback 'RefreshTasksButton' 'Add_Click'
 $timerUpdate=$assistantAst.Find({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Update-VoiceTaskSwitch'},$true)
@@ -66,6 +66,7 @@ $script:AnswerBox=New-Object Windows.Controls.TextBox
 $script:TaskLabel=New-Object Windows.Controls.TextBlock
 $script:TaskCombo=New-Object Windows.Controls.ComboBox
 $script:desktop=@{}
+$TaskCombo.Add_SelectionChanged($selectionChanged)
 $script:checks=0;$script:caseNumber=0;$script:results=New-Object Collections.ArrayList
 $sourceId='11111111-1111-4111-8111-111111111111'
 $targetId='22222222-2222-4222-8222-222222222222'
@@ -98,6 +99,7 @@ function Show-DesktopSettings($Shell){$script:shown++}
 function Update-TaskSelection {$script:selectionUpdates++;$script:selectionWasPending=($null -ne $script:voiceTaskSwitch)}
 function Reset-Case {
     $script:caseNumber++
+    $script:manualTaskBinding=$null;$script:bindingAvailability='active';$script:bindingReadError='';$script:taskSelectionMessage=''
     $script:voiceTaskSwitch=$null;$script:voiceTaskSwitchGeneration=0
     $script:voiceTaskCreate=$null;$script:stateDir=Join-Path $runRoot ('case-'+$script:caseNumber);[void][IO.Directory]::CreateDirectory($script:stateDir)
     $script:voiceTaskCreatePath=Join-Path $script:stateDir 'voice-task-create.json'
@@ -118,8 +120,11 @@ function Reset-Case {
     $script:bargeInEnabled=$false;$script:wakePhrase='你好，声伴';$script:waveStyle='rays';$script:waveSize=260
     $script:pinned=$true;$script:captionsVisible=$false;$script:floatingVisible=$true
     $script:selectionUpdates=0;$script:selectionWasPending=$false;$script:sent=0;$script:clearedReceipts=0;$script:windowClosed=$false
-    $TaskCombo.Items.Clear();$script:oldChoice=[pscustomobject]@{threadId=$sourceId;title='Original title';cwd='original-directory'}
-    [void]$TaskCombo.Items.Add($script:oldChoice);$TaskCombo.SelectedItem=$script:oldChoice
+    $script:syncingUi=$true
+    try {
+        $TaskCombo.Items.Clear();$script:oldChoice=[pscustomobject]@{threadId=$sourceId;title='Original title';cwd='original-directory'}
+        [void]$TaskCombo.Items.Add($script:oldChoice);$TaskCombo.SelectedItem=$script:oldChoice
+    } finally { $script:syncingUi=$false }
     Initialize-VoiceTaskCreate
 }
 function Case([string]$Name,[scriptblock]$Body){
@@ -160,6 +165,23 @@ function Assert-NoSend {Assert ((Count-Request 'send') -eq 0) 'A task operation 
 function Assert-DurableTarget {
     $record=Get-Content -LiteralPath $script:voiceTaskCreatePath -Raw -Encoding UTF8|ConvertFrom-Json
     Assert (($record|ConvertTo-Json -Depth 12) -like ('*'+$targetId+'*')) 'The late successful receipt did not retain its real target ID.'
+}
+
+Case 'Programmatic selector population during creation does not trigger auto-connect or invalidate its receipt' {
+    Start-Create;$mutation=$script:bridgeJob
+    $script:syncingUi=$true
+    try {
+        $item=[pscustomobject]@{threadId=$targetId;title='Created fixture task';cwd='target-directory'}
+        [void]$TaskCombo.Items.Add($item);$TaskCombo.SelectedItem=$item
+    } finally { $script:syncingUi=$false }
+    Sync-TaskBindingSelection
+    Assert ([object]::ReferenceEquals($script:bridgeJob,$mutation) -and $script:voiceTaskCreate.AutoBindAllowed -and (Count-Request 'read') -eq 0 -and $null -eq $script:manualTaskBinding) 'Programmatic selector synchronization started a manual read or invalidated creation.'
+    Assert ($TaskCombo.SelectedItem -eq $script:oldChoice) 'Programmatic synchronization did not retain the actual binding.'
+    Assert-Source;Assert-NoSend
+    Complete-Job (Create-Result)
+    Complete-Job (Read-Result)
+    Assert ($script:threadId -eq $targetId -and $TaskCombo.SelectedItem.threadId -eq $targetId -and (Count-Request 'create') -eq 1 -and (Count-Request 'read') -eq 1 -and $null -eq $script:manualTaskBinding) 'Validated creation triggered an extra selection auto-connect or lost its target.'
+    Assert-NoSend
 }
 
 Case 'Creation receipt is read-validated before binding and the next message uses the new ID' {

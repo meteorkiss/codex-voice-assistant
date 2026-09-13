@@ -606,6 +606,7 @@ try {
             $statusData.recoveryDraftError=[string]$script:recoveryDraftError
             $statusData.selectedTaskId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' }
             $statusData.selectionNeedsConnection=[bool]($TaskCombo.SelectedItem -and (-not $script:connected -or $TaskCombo.SelectedItem.threadId -cne $script:threadId))
+            $statusData.settingsTopmost=[bool]$desktop.SettingsWindow.Topmost
             $statusData.bindingReadError=$script:bindingReadError
             $statusData.lastLocalCommand=$script:lastLocalCommand
             $statusData.localCommandMessage=$script:localCommandMessage
@@ -650,6 +651,8 @@ try {
                 $layerStatus=Get-DesktopTopmostStatus $desktop
                 if ($layerStatus) {
                     $statusData.nativeTopmost=[bool]($layerStatus.Windows | Where-Object { $_.Role -eq 'main' }).NativeTopmost
+                    $statusData.settingsNativeTopmost=[bool]($layerStatus.Windows | Where-Object { $_.Role -eq 'settings' }).NativeTopmost
+                    $statusData.settingsHasHandle=[bool]($layerStatus.Windows | Where-Object { $_.Role -eq 'settings' }).HasHandle
                     $statusData.topmostRecoveryCount=$layerStatus.ForegroundRepairs
                     $statusData.topmostError=$layerStatus.LastError
                 }

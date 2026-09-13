@@ -54,7 +54,7 @@ namespace ShengBan.Desktop
         private static extern bool IsWindow(IntPtr window);
 
         // Microsoft SetWindowPos: NOACTIVATE preserves focus; NOOWNERZORDER
-        // preserves the owner when an owned caption/settings window is raised.
+        // preserves the owner when an owned caption window is raised.
         // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwindowpos
         private const uint PositionFlags = 0x0001 | 0x0002 | 0x0010 | 0x0200;
         private readonly Window[] windows;
@@ -112,9 +112,10 @@ namespace ShengBan.Desktop
 
         private bool Live(Window window) { return window != null && !closed.Contains(window); }
         private bool Visible(Window window) { return Live(window) && window.IsVisible && window.WindowState != WindowState.Minimized; }
-        private bool AnyVisible()
+        private bool DesiredTopmost(Window window) { return window != windows[2] && pinned; }
+        private bool AnyPinnedVisible()
         {
-            foreach (Window window in windows) if (Visible(window)) return true;
+            foreach (Window window in windows) if (DesiredTopmost(window) && Visible(window)) return true;
             return false;
         }
 
@@ -141,8 +142,8 @@ namespace ShengBan.Desktop
             bool changed = !configured || pinned != value;
             pinned = value;
             configured = true;
-            // A settings window owned by a topmost main window already inherits
-            // native topmost. Explicitly keep its WPF property in sync too.
+            // Pinning applies only to the floating window and captions. Settings
+            // are an independent normal window, including at native HWND level.
             Apply(changed, true);
             UpdateTimer();
         }
@@ -154,12 +155,20 @@ namespace ShengBan.Desktop
             var errors = new List<string>();
             try
             {
-                // Owner first; caption then settings. Raising the visible group
-                // never brings a caption over the user's open settings window.
+                // A topmost owner propagates native topmost to its owned windows
+                // even if their WPF Topmost property is false. Keep settings
+                // independent before applying the floating/caption preference.
+                Window settings = windows[2];
+                if (Live(settings) && settings.Owner != null)
+                {
+                    try { settings.Owner = null; }
+                    catch (Exception error) { errors.Add(error.Message); }
+                }
                 foreach (Window window in windows)
                 {
                     if (!Live(window) || (!includeHidden && !Visible(window))) continue;
-                    try { if (window.Topmost != pinned) window.Topmost = pinned; }
+                    bool desired = DesiredTopmost(window);
+                    try { if (window.Topmost != desired) window.Topmost = desired; }
                     catch (Exception error) { errors.Add(error.Message); }
                 }
                 foreach (Window window in windows)
@@ -169,9 +178,10 @@ namespace ShengBan.Desktop
                     {
                         IntPtr handle = OwnedHandle(window);
                         if (handle == IntPtr.Zero) continue;
-                        bool needsChange = NativeTopmost(handle) != pinned;
-                        if (!needsChange && !(pinned && raiseVisible && Visible(window))) continue;
-                        if (!SetWindowPos(handle, new IntPtr(pinned ? -1 : -2), 0, 0, 0, 0, PositionFlags))
+                        bool desired = DesiredTopmost(window);
+                        bool needsChange = NativeTopmost(handle) != desired;
+                        if (!needsChange && !(desired && raiseVisible && Visible(window))) continue;
+                        if (!SetWindowPos(handle, new IntPtr(desired ? -1 : -2), 0, 0, 0, 0, PositionFlags))
                             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
                         nativeUpdates++;
                     }
@@ -188,7 +198,7 @@ namespace ShengBan.Desktop
         public void Refresh()
         {
             windows[0].Dispatcher.VerifyAccess();
-            if (disposed || !configured || !pinned || !AnyVisible()) { UpdateTimer(); return; }
+            if (disposed || !configured || !pinned || !AnyPinnedVisible()) { UpdateTimer(); return; }
             checks++;
             if (menu != null && menu.IsOpen) return;
             try
@@ -205,19 +215,19 @@ namespace ShengBan.Desktop
 
         private void UpdateTimer()
         {
-            if (!disposed && configured && pinned && AnyVisible()) timer.Start();
+            if (!disposed && configured && pinned && AnyPinnedVisible()) timer.Start();
             else timer.Stop();
         }
         private void OnTick(object sender, EventArgs args) { Refresh(); }
-        private void OnSourceInitialized(object sender, EventArgs args) { Apply(true, true); UpdateTimer(); }
+        private void OnSourceInitialized(object sender, EventArgs args) { Apply(sender != windows[2], true); UpdateTimer(); }
         private void OnVisibilityChanged(object sender, DependencyPropertyChangedEventArgs args)
         {
-            if (menu == null || !menu.IsOpen) Apply((bool)args.NewValue, true);
+            if (menu == null || !menu.IsOpen) Apply(sender != windows[2] && (bool)args.NewValue, true);
             UpdateTimer();
         }
         private void OnStateChanged(object sender, EventArgs args)
         {
-            if (menu == null || !menu.IsOpen) Apply(Visible(sender as Window), true);
+            if (menu == null || !menu.IsOpen) Apply(sender != windows[2] && Visible(sender as Window), true);
             UpdateTimer();
         }
         private void OnMenuClosed(object sender, RoutedEventArgs args) { Refresh(); }

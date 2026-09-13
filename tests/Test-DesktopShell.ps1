@@ -36,7 +36,9 @@ try {
     Assert-Ui ($shell.Controls.WakeHintLabel.TextWrapping -eq 'Wrap') 'wake validation status can wrap'
     Assert-Ui ($shell.Controls.PauseResumeButton.Content -eq '暂停朗读' -and $shell.Controls.MenuPauseResume.Header -eq '暂停朗读') 'pause and resume entries start with pause label'
     Assert-Ui ($shell.Menu.Items.IndexOf($shell.Controls.MenuPauseResume) -eq ($shell.Menu.Items.IndexOf($shell.Controls.MenuStop)-1)) 'pause entry immediately precedes stop'
-    foreach ($name in @('TaskLabel','StatusLabel','AnswerBox','InputBox','SpeakButton','SendButton','StopButton','PinToggle','HandsFreeToggle','FooterHint','AnswerStateLabel','DirectoryCombo','TaskCombo','RefreshTasksButton','BindTaskButton','OpenTaskButton','VoiceCombo','RateCombo','AutoReadToggle','AutoSendToggle','StyleCombo','SizeSlider','CaptionToggle','ResetPositionButton','MenuPin','MenuSettings','MenuCaptions','MenuStop','MenuVisibility','CaptionText','CaptionTask','CaptionStatus','TaskDirectoryLabel','PreviewVoiceButton','ReplayButton','CaptionExpandButton','CaptionCloseButton')) {
+    Assert-Ui (-not $shell.Controls.ContainsKey('BindTaskButton')) 'selection connects without a separate bind button'
+    Assert-Ui (-not $shell.SettingsWindow.Topmost -and $null -eq $shell.SettingsWindow.Owner) 'settings do not inherit floating-window topmost ownership'
+    foreach ($name in @('TaskLabel','StatusLabel','AnswerBox','InputBox','SpeakButton','SendButton','StopButton','PinToggle','HandsFreeToggle','FooterHint','AnswerStateLabel','DirectoryCombo','TaskCombo','RefreshTasksButton','OpenTaskButton','VoiceCombo','RateCombo','AutoReadToggle','AutoSendToggle','StyleCombo','SizeSlider','CaptionToggle','ResetPositionButton','MenuPin','MenuSettings','MenuCaptions','MenuStop','MenuVisibility','CaptionText','CaptionTask','CaptionStatus','TaskDirectoryLabel','PreviewVoiceButton','ReplayButton','CaptionExpandButton','CaptionCloseButton')) {
         Assert-Ui ($shell.Controls.ContainsKey($name) -and $null -ne $shell.Controls[$name]) ('control '+$name)
     }
     foreach ($style in @('rays','halo','particles','minimal','bars','flow')) {

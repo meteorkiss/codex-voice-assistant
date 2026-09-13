@@ -1,6 +1,8 @@
 ﻿# v6 测试说明
 
-更新：2026-09-12。以下命令从项目根目录执行，使用 Windows PowerShell 5.1；WPF 测试带 `-STA`。测试样本在 `tests/fixtures`，运行产物写入 `work/tests` 或 `work/desktop-shell-render`。不应使用个人 `data` 作为测试输出目录。
+更新：2026-09-13。以下命令从项目根目录执行，使用 Windows PowerShell 5.1；WPF 测试带 `-STA`。测试样本在 `tests/fixtures`，运行产物写入 `work/tests` 或 `work/desktop-shell-render`。不应使用个人 `data` 作为测试输出目录。
+
+2026-09-13 设置增量：独立 `Test-TaskAutoConnect.ps1` 19 场景/166 断言，`Test-DesktopController.ps1` 21 场景、`Test-DesktopTopmost.ps1` 97 断言、布局 119、Dispatcher 18 步、归档恢复 88、免手 340、基础设施 91 通过，源码声明 46 项。使用生产 WPF 回调和桥接/音频替身；设置原生非置顶检查不等于微信截图实测。统一入口登记 22 组，但未运行此前被拒的组合命令；两份旧切换/创建集成只适配已删除按钮并通过静态解析，不能记为运行通过。新专项自行清理成功；Controller 的 4 个生成文件及 23 个渲染/结果文件清理被策略拒绝，保留于忽略目录且未重试。
 
 0.6.17 归档恢复增量：新增直接独立运行 `Test-DraftRecovery.ps1`（26）和 `Test-BindingRecovery.ps1`（15 场景/88 断言），涵盖先存再清、本地唤醒切换、普通语音不发送、手动连接、保存失败、旧异步失效及非阻塞状态探测。桥接 53、WakeRecovery 92（16 场景）、免手 340、控制器 21 场景、布局 118、基础设施 91、新建 Python 33、管理 Python 26 通过，源码声明 46 项。WakeRecovery 原测试未加载此前提取的 AudioOutput，现补真实模块而非略过断言。统一入口登记为 21 组，但本轮只运行上述独立检查，未重试曾被拒的临时源码复制/组合运行/递归清理操作。所有消息/创建/设备为替身，实际现场重载与真人验收另记。
 

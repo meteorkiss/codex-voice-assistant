@@ -1,5 +1,6 @@
 # Only this application's supplied WPF windows are managed. No external HWND is
 # ever changed. Native foreground reads trigger at most one lift per change.
+# The pin preference covers the floating window and captions, never settings.
 $script:DesktopTopmostSourceRoot=$PSScriptRoot
 
 function Import-DesktopTopmostTypes {

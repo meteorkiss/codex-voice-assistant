@@ -27,7 +27,7 @@ foreach($item in @(@{Tree=$assistantAst;Names=@('Send-Text','Apply-Thread','Save
         . ([scriptblock]::Create($node.Extent.Text))
     }
 }
-foreach($module in @('reader-core.ps1','VoiceCommands.ps1','LocalCommands.ps1','TaskSwitch.ps1','TaskCreate.ps1')){. (Join-Path $Root ('src\'+$module))}
+foreach($module in @('reader-core.ps1','VoiceCommands.ps1','LocalCommands.ps1','TaskSwitch.ps1','TaskCreate.ps1','DraftRecovery.ps1','BindingRecovery.ps1')){. (Join-Path $Root ('src\'+$module))}
 $completionNode=$assistantAst.Find({param($n)
     $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses.Count -eq 1 -and
     $n.Clauses[0].Item1.Extent.Text -match '^\$script:bridgeJob\s+-and\s+\$script:bridgeJob\.Process\.HasExited$'
@@ -44,7 +44,6 @@ function Get-ControllerCallback([string]$Variable,[string]$Event){
     $source=$node.Arguments[0].ScriptBlock.Extent.Text
     return [scriptblock]::Create($source.Substring(1,$source.Length-2))
 }
-$manualBind=Get-ControllerCallback 'BindTaskButton' 'Add_Click'
 $selectionChanged=Get-ControllerCallback 'TaskCombo' 'Add_SelectionChanged'
 $inputChanged=Get-ControllerCallback 'InputBox' 'Add_TextChanged'
 $directoryChanged=Get-ControllerCallback 'DirectoryCombo' 'Add_SelectionChanged'
@@ -92,6 +91,10 @@ function Update-TaskSelection {$script:selectionUpdates++;$script:selectionWasPe
 function Reset-Case {
     $script:manualTaskBinding=$null;$script:voiceTaskCreate=$null
     $script:caseNumber++
+    $script:stateDir=Join-Path $runRoot ('case-'+$script:caseNumber)
+    [void][IO.Directory]::CreateDirectory($script:stateDir)
+    Initialize-BindingRecovery
+    $script:bindingAvailability='active';$script:bindingReadError='';$script:taskSelectionMessage=''
     $script:voiceTaskSwitch=$null;$script:voiceTaskSwitchGeneration=0
     $script:threadId=$sourceId;$script:voiceGeneration=7;$script:connected=$true;$script:busy=$true
     $script:boundDirectory='original-directory';$script:lastUserVersion=4
@@ -204,11 +207,11 @@ Case 'Two candidates accept a spoken second selection and validate that target' 
     Assert ($script:queued.Count -eq 2) 'Candidate and success feedback were not each queued once.'
     Assert-NoSend
 }
-Case 'Manual Bind captures candidate ID before Reset restores the original selector' {
+Case 'Selecting a candidate auto-connects its captured ID before Reset restores the original selector' {
     Start-Choice;$TaskCombo.SelectedIndex=1
-    & $manualBind
     Assert ($null -eq $script:voiceTaskSwitch -and $TaskCombo.SelectedItem -eq $script:oldChoice) 'Manual bind did not reset the temporary selector.'
     Assert ($script:bridgeJob.Purpose -eq 'bind' -and $script:bridgeJob.Request.threadId -eq $thirdId) 'Manual bind accidentally read the restored original task.'
+    Assert ($script:bridgeJob.TaskBindingContext.AutoConnect -and @($script:requests|Where-Object {$_.Purpose -eq 'bind'}).Count -eq 1) 'Candidate selection did not start exactly one auto-connect validation.'
     Assert-Source
     Complete-Job (Bind-Result $thirdId)
     Assert ($script:threadId -eq $thirdId -and $AnswerBox.Text -eq 'Target full answer') 'Generic manual bind callback did not apply the captured ID.'
@@ -274,20 +277,42 @@ Case 'Short cancellation wording is consumed only while candidates are pending' 
 function Start-Manual {
     $item=Candidate
     [void]$TaskCombo.Items.Add($item);$TaskCombo.SelectedItem=$item
-    & $manualBind
-    Assert ($script:bridgeJob.Purpose -eq 'bind' -and $script:bridgeJob.TaskBindingContext.TargetThreadId -eq $targetId) 'Manual request lacks validated context.'
+    Assert ($script:bridgeJob.Purpose -eq 'bind' -and $script:bridgeJob.TaskBindingContext.TargetThreadId -eq $targetId -and $script:bridgeJob.TaskBindingContext.AutoConnect) 'Selection did not start auto-connect with validated context.'
 }
-Case 'Manual binding blocks an existing draft and pending dispatch without clearing either' {
-    foreach ($automatic in @($false,$true)) {
-        Reset-Case
+Case 'Programmatic selection synchronization does not auto-connect or disturb a draft' {
+    $InputBox.Text='Keep this draft'
+    $script:syncingUi=$true
+    try {
         $item=Candidate;[void]$TaskCombo.Items.Add($item);$TaskCombo.SelectedItem=$item
+    } finally { $script:syncingUi=$false }
+    Assert ($script:requests.Count -eq 0 -and $null -eq $script:manualTaskBinding) 'Programmatic list selection started a connection.'
+    Sync-TaskBindingSelection
+    Assert ($TaskCombo.SelectedItem -eq $script:oldChoice -and $script:requests.Count -eq 0 -and $InputBox.Text -ceq 'Keep this draft') 'Binding synchronization triggered a connection or altered a draft.'
+    Assert-Source;Assert-NoSend
+}
+Case 'Selecting a different task saves the existing draft before starting validation' {
+    $InputBox.Text='Keep this draft'
+    Start-Manual
+    Assert ($InputBox.Text -ceq '' -and $script:recoveryDraftCount -eq 1 -and (Test-Path -LiteralPath $script:lastRecoveryDraftPath -PathType Leaf)) 'Selection did not safely save the original draft before clearing input.'
+    $savedDraft=Get-Content -LiteralPath $script:lastRecoveryDraftPath -Raw -Encoding UTF8
+    Assert ($savedDraft.Contains('Keep this draft') -and $savedDraft.Contains($sourceId)) 'Saved draft lost its text or original task ownership.'
+    Assert-Source;Assert-NoSend
+    Complete-Job (Bind-Result)
+    Assert ($script:threadId -eq $targetId -and $InputBox.Text -ceq '' -and $script:requests.Count -eq 1) 'Validated selection restored or forwarded the old draft.'
+    Assert-NoSend
+}
+Case 'Draft save failure and pending dispatch block auto-connect without clearing either' {
+    foreach ($kind in @('saveFailure','dispatch')) {
+        Reset-Case
         $InputBox.Text='Keep this draft'
-        if ($automatic) { $script:autoDispatch=@{Text='Keep this draft'} }
+        if ($kind -eq 'dispatch') { $script:autoDispatch=@{Text='Keep this draft'} }
+        else { $script:stateDir=Join-Path $runRoot 'missing-draft-parent' }
         $intent=$script:autoDispatch
-        & $manualBind
+        $item=Candidate;[void]$TaskCombo.Items.Add($item);$TaskCombo.SelectedItem=$item
         Assert-Source
-        Assert ($script:requests.Count -eq 0 -and $InputBox.Text -ceq 'Keep this draft') 'Manual bind discarded a draft or dispatched anyway.'
-        Assert ([object]::ReferenceEquals($script:autoDispatch,$intent)) 'Manual bind erased an automatic dispatch intent.'
+        Assert ($script:requests.Count -eq 0 -and $InputBox.Text -ceq 'Keep this draft' -and $TaskCombo.SelectedItem -eq $script:oldChoice) ('Auto-connect discarded a draft, dispatched, or retained an unconnected selection: '+$kind)
+        Assert ([object]::ReferenceEquals($script:autoDispatch,$intent)) 'Auto-connect erased an automatic dispatch intent.'
+        if ($kind -eq 'saveFailure') { Assert ([bool]$script:recoveryDraftError) 'Draft persistence failure was not exposed.' }
     }
 }
 Case 'Text changed then erased still invalidates the original manual read' {
@@ -303,13 +328,18 @@ Case 'Text changed then erased still invalidates the original manual read' {
     Assert-Source
     Assert ($script:notice -ceq 'Newer status') 'Late failure overwrote the newer notice.'
 }
-Case 'Changing task selection away and back cannot resurrect a read' {
+Case 'Changing task selection away and back starts a fresh read without resurrecting the old token' {
     Start-Manual;$job=$script:bridgeJob;$target=$TaskCombo.SelectedItem
     $TaskCombo.SelectedItem=$script:oldChoice;$TaskCombo.SelectedItem=$target
-    Assert ($null -eq $script:manualTaskBinding) 'Selection change retained the old token.'
-    Complete-Job (Bind-Result) $job
+    $newJob=$script:bridgeJob
+    Assert ($script:manualTaskBinding -and $newJob.TaskBindingContext.AutoConnect -and $newJob.TaskBindingContext.Token -cne $job.TaskBindingContext.Token -and $script:requests.Count -eq 2) 'Selection ABA did not create exactly one fresh validation token.'
+    # Deliver the old binding callback without replacing the newer bridge job.
+    Assert (-not (Complete-ManualTaskBinding (Bind-Result) $job.TaskBindingContext)) 'Selection ABA accepted the stale binding token.'
+    Assert ([object]::ReferenceEquals($script:bridgeJob,$newJob) -and $script:manualTaskBinding.Token -ceq $newJob.TaskBindingContext.Token) 'Stale callback invalidated the newer selection.'
     Assert-Source
     Assert (-not (Test-Path -LiteralPath $settingsPath)) 'Selection ABA change committed stale settings.'
+    Complete-Job (Bind-Result) $newJob
+    Assert ($script:threadId -eq $targetId) 'The fresh explicit selection failed to commit after ignoring the stale receipt.'
 }
 Case 'New recording generation and pending text reject a manual completion' {
     foreach($change in @('generation','recording','dispatch','source','closing')) {
@@ -363,15 +393,16 @@ Case 'Shared commit rolls back when settings cannot be saved' {
 Case 'Busy sending or uncertain receipt prevents manual reads and does not kill the sender' {
     foreach($kind in @('send','uncertain','ledger')) {
         Reset-Case
-        $item=Candidate;[void]$TaskCombo.Items.Add($item);$TaskCombo.SelectedItem=$item
         switch($kind) {
             'send' {$script:bridgeJob=@{Purpose='send'}}
             'uncertain' {$script:pendingUncertain=$true}
             'ledger' {$script:pendingSends[$sourceId]=@{requestId='existing'}}
         }
-        $job=$script:bridgeJob;& $manualBind
+        $job=$script:bridgeJob
+        $item=Candidate;[void]$TaskCombo.Items.Add($item);$TaskCombo.SelectedItem=$item
         Assert-Source
         Assert ($script:requests.Count -eq 0 -and $script:closedJobs.Count -eq 0 -and [object]::ReferenceEquals($script:bridgeJob,$job)) ('Manual bind bypassed '+$kind)
+        Assert ($TaskCombo.SelectedItem -eq $script:oldChoice -and [bool]$script:taskSelectionMessage) ('Blocked auto-connect did not restore the actual destination: '+$kind)
     }
 }
 Case 'Refresh directory change timeout and cancellation invalidate manual requests' {

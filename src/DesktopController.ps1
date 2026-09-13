@@ -115,10 +115,10 @@ function Set-TaskCandidates($Threads, [string]$Warning='') {
         foreach ($entry in $DirectoryCombo.Items) { if ($entry.path -eq $script:directoryFilter) { $DirectoryCombo.SelectedItem=$entry; break } }
     } finally { $script:syncingUi=$false }
     Update-TaskSelection
-    $script:notice=if ($Warning) { $Warning } elseif ($script:taskCandidates.Count) { '对话列表已更新，选择后点击“连接所选任务”。' } else { '没有可连接的本机对话，请先在 Codex 创建或打开一个对话。' }
+    $script:notice=if ($Warning) { $Warning } elseif ($script:taskCandidates.Count) { '对话列表已更新，选中任务后自动连接。' } else { '没有可连接的本机对话，请先在 Codex 创建或打开一个对话。' }
 }
 function Update-TaskSelection {
-    $selected=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { $script:threadId }
+    $selected=if (-not (Test-TaskBindingSelectionHealthy)) { '' } elseif ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { $script:threadId }
     $filter=if ($DirectoryCombo.SelectedItem) { [string]$DirectoryCombo.SelectedItem.path } else { '' }
     $script:directoryFilter=$filter
     $script:syncingUi=$true
@@ -195,9 +195,12 @@ function Update-DesktopDisplay {
         $desktop.Controls.EchoStatusLabel.Text=if ($script:wakeListener -and $script:wakeListener.Error) { '音频设备未就绪：'+$script:wakeListener.Error } elseif (-not $script:bargeInEnabled) { '轮流听说：朗读结束后恢复语音唤醒。' } elseif (-not $script:handsFreeEnabled) { '开启语音唤醒后检查回声消除设备。' } elseif (Test-FullDuplexReady) { '回声消除已就绪，朗读中可喊“'+$script:wakePhrase+'”。' } else { '正在准备回声消除；设备不兼容时可关闭此选项。' }
     }
     if ($desktop.Controls.ContainsKey('MenuFollowUpEnd')) { $desktop.Controls.MenuFollowUpEnd.IsEnabled=[bool]($script:shortFollowUp -or $script:followUpCapture) }
-    $BindTaskButton.IsEnabled=($null -ne $TaskCombo.SelectedItem -and -not $script:bridgeJob -and $script:recMode -eq 'idle')
+    # A failed/currently unavailable target must remain selectable again, even
+    # when its ID is still saved. Selecting an already selected WPF row emits
+    # no SelectionChanged event, so keep unhealthy non-pending selections empty.
+    if (-not $script:manualTaskBinding -and -not (Test-TaskBindingSelectionHealthy) -and $TaskCombo.SelectedItem -and $TaskCombo.SelectedItem.threadId -ceq $script:threadId) { Sync-TaskBindingSelection }
     if ($desktop.Controls.ContainsKey('TaskSelectionHint')) {
-        $desktop.Controls.TaskSelectionHint.Text=if ($TaskCombo.SelectedItem -and (-not $script:connected -or $TaskCombo.SelectedItem.threadId -cne $script:threadId)) { '已选中但尚未连接。请点击“连接所选任务”；旧草稿会单独保存。' } elseif ($script:connected) { '已连接到当前所选任务；后续消息发往这里。' } else { '先选择任务，再点击连接。' }
+        $desktop.Controls.TaskSelectionHint.Text=if ($script:manualTaskBinding) { '正在连接所选任务，请等待确认；旧草稿不会发送到新任务。' } elseif ($script:taskSelectionMessage) { $script:taskSelectionMessage } elseif ($TaskCombo.SelectedItem -and $script:connected -and $TaskCombo.SelectedItem.threadId -ceq $script:threadId) { '已连接到所选任务；后续消息发往这里。' } elseif ($script:connected) { '当前连接保持不变；选择其它任务后自动连接。' } else { '选中任务后自动连接；旧草稿会单独保存。' }
     }
     if ($desktop.Controls.ContainsKey('BindingAvailabilityLabel')) {
         $desktop.Controls.BindingAvailabilityLabel.Text=if ($script:bindingAvailability -eq 'archived') { '原任务已归档，普通发送已停用；可唤醒后说切换任务。' } elseif ($script:bindingAvailability -eq 'missing') { '原任务不存在，请重新选择；不会自动连接其它任务。' } elseif ($script:bindingAvailability -eq 'unknown') { $script:bindingAvailabilityError } elseif ($script:connected) { '连接有效' } else { '尚未建立可发送的连接' }
@@ -212,6 +215,7 @@ function Update-DesktopDisplay {
 function Initialize-DesktopController {
     $script:tasksLoaded=$false
     $script:taskCandidates=@()
+    $script:taskSelectionMessage=''
     $script:syncingUi=$true
     $DirectoryCombo.DisplayMemberPath='name'
     $TaskCombo.DisplayMemberPath='title'
@@ -263,10 +267,27 @@ function Initialize-DesktopController {
     $RefreshTasksButton.Add_Click({ Refresh-AssistantTasks })
     $TaskCombo.Add_SelectionChanged({
         if (-not $script:syncingUi) {
-            if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标任务选择已改变，连续接话已结束。' -CancelCapture }
-            Reset-ManualTaskBinding '选择已改变，取消上次连接；请点击连接所选任务。'
-            Invalidate-VoiceTaskCreateBinding -Reason '已手动改变任务选择'
-            if ($script:voiceTaskSwitch -and $script:voiceTaskSwitch.Phase -ne 'choosing') { Reset-VoiceTaskSwitch }
+            $selectedId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' }
+            $script:taskSelectionMessage=''
+            try {
+                Reset-ManualTaskBinding -KeepSelection
+                if (-not $selectedId) { return }
+                # Re-selecting the live destination is harmless and must not
+                # move its draft or interrupt playback just to validate again.
+                if ($script:connected -and $selectedId -ceq $script:threadId -and $script:bindingAvailability -notin @('archived','missing','unknown') -and -not $script:bindingReadError) { return }
+                if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标任务选择已改变，连续接话已结束。' -CancelCapture }
+                Invalidate-VoiceTaskCreateBinding -Reason '已手动改变任务选择'
+                if ($script:voiceTaskSwitch -and $script:voiceTaskSwitch.Phase -ne 'choosing') { Reset-VoiceTaskSwitch }
+                if (-not (Begin-ManualTaskBinding $selectedId -AutoConnect)) {
+                    $script:taskSelectionMessage=$script:notice+' 未切换，请处理后重新选择任务。'
+                    Sync-TaskBindingSelection
+                }
+            } catch {
+                $script:notice='自动连接未完成，已保留原任务和未发送文字，请重新选择。'
+                $script:taskSelectionMessage=$script:notice
+                Reset-ManualTaskBinding
+                Sync-TaskBindingSelection
+            }
         }
     })
     $InputBox.Add_TextChanged({
@@ -277,10 +298,6 @@ function Initialize-DesktopController {
                 Close-ShortFollowUp '草稿已保留，连续接话已结束。' -CancelCapture
             }
         }
-    })
-    $BindTaskButton.Add_Click({
-        if ($TaskCombo.SelectedItem) { [void](Begin-ManualTaskBinding ([string]$TaskCombo.SelectedItem.threadId)) }
-        else { $script:notice='请先选择一个本机任务。' }
     })
     $OpenTaskButton.Add_Click({ if ($script:connected) { [void](Start-Bridge @{action='open';threadId=$script:threadId} 'open') } })
     $ResetPositionButton.Add_Click({ Reset-DesktopShellPosition $desktop; Save-Settings })

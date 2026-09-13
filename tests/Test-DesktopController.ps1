@@ -31,7 +31,8 @@ function Save-Settings {
     if ($script:preferenceSaveFails) { throw 'Simulated preference write failure.' }
     [void]$script:saved.Add(@{threadId=$script:threadId;cwd=$script:boundDirectory;directoryFilter=$script:directoryFilter;voice=$script:voiceId;rate=$script:speechRate;style=$script:waveStyle;size=$script:waveSize;autoRead=$script:autoRead;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled})
 }
-function Start-Bridge($Request,[string]$Purpose) { [void]$script:effects.Add(@{action='bridge';purpose=$Purpose;request=$Request.Clone()}); return $true }
+function Start-Bridge($Request,[string]$Purpose) { [void]$script:effects.Add(@{action='bridge';purpose=$Purpose;request=$Request.Clone()}); $script:bridgeJob=@{Purpose=$Purpose}; return $true }
+function Close-Job($Job,[switch]$Kill) { [void]$script:effects.Add(@{action='closeJob';purpose=$Job.Purpose}) }
 function Stop-Output([string]$Message='') { [void]$script:effects.Add(@{action='stop'}); $script:speechQueue.Clear() }
 function Queue-AnswerSpeech([string]$Text) { [void]$script:effects.Add(@{action='queue';text=$Text}); $script:speechQueue.Enqueue($Text) }
 function Suspend-WakeListener { [void]$script:effects.Add(@{action='suspendWake'}) }
@@ -90,23 +91,25 @@ try {
         Assert-That ((Count-Effect 'bridge') -eq $before+1) 'Refresh did not request a list.'
         $last=$script:effects[$script:effects.Count-1]
         Assert-That ($last.request.action -eq 'list' -and -not $last.request.ContainsKey('threadId')) 'First list needs an existing task.'
+        $script:bridgeJob=$null
         Set-TaskCandidates @($taskA,$taskB)
         Assert-That ($TaskCombo.SelectedIndex -eq -1) 'First candidate was automatically selected.'
-        Assert-That ($script:notice -eq '对话列表已更新，选择后点击“连接所选任务”。') 'The refreshed list did not explain the explicit connection step.'
+        Assert-That ($script:notice -like '*选*自动连接*' -and $script:notice -notlike '*点击*连接所选任务*') 'The refreshed list did not explain selection-driven connection.'
         Set-TaskCandidates @($taskA,$taskB) '部分对话名称尚未同步。'
         Assert-That ($script:notice -eq '部分对话名称尚未同步。') 'The title synchronization warning was hidden.'
         Assert-That ($TaskCombo.SelectedIndex -eq -1 -and -not $script:threadId) 'A title warning changed the target.'
-        $before=Count-Effect 'bridge'; Invoke-Click $BindTaskButton
-        Assert-That ((Count-Effect 'bridge') -eq $before) 'Bind submitted without a selected task.'
+        Assert-That (-not $desktop.Controls.ContainsKey('BindTaskButton')) 'The redundant connect button still exists.'
+        Assert-That ((Count-Effect 'bridge') -eq $before+1) 'Refreshing candidates submitted a connection without user selection.'
     }
-    Test-Case 'selection requires an explicit bind and read validation' {
+    Test-Case 'selection immediately requests validation without binding before its receipt' {
+        $before=Count-Effect 'bridge'
         $TaskCombo.SelectedItem=$taskA
-        Assert-That (-not $script:threadId) 'Selecting a row changed the binding.'
-        $before=Count-Effect 'bridge'; Invoke-Click $BindTaskButton
-        Assert-That ((Count-Effect 'bridge') -eq $before+1) 'Bind button did not request validation.'
+        Assert-That ((Count-Effect 'bridge') -eq $before+1) 'Selecting a task did not request validation once.'
         $last=$script:effects[$script:effects.Count-1]
         Assert-That ($last.purpose -eq 'bind' -and $last.request.action -eq 'read' -and $last.request.threadId -eq $taskA.threadId) 'Bind validation targeted another task.'
         Assert-That (-not $script:threadId) 'Task bound before the read receipt.'
+        Assert-That ($script:manualTaskBinding -and $script:bridgeJob.TaskBindingContext.AutoConnect) 'Selection did not retain a guarded automatic binding context.'
+        Reset-ManualTaskBinding
     }
     Test-Case 'validated binding persists cwd and preserves per-task uncertainty' {
         $script:pendingSends[$taskA.threadId]=@{requestId=$requestA}
@@ -150,11 +153,12 @@ try {
         Assert-That ((Count-Effect 'stop') -eq $previousStop) 'Rebinding the current task interrupted playback.'
     }
     Test-Case 'binding is blocked while a request or recording is active' {
-        $TaskCombo.SelectedItem=$taskB
         $before=Count-Effect 'bridge'
-        $script:bridgeJob=@{Purpose='send'}; Invoke-Click $BindTaskButton; $script:bridgeJob=$null
-        $script:recMode='transcribing'; Invoke-Click $BindTaskButton; $script:recMode='idle'
+        $script:bridgeJob=@{Purpose='send'}; $TaskCombo.SelectedItem=$taskB; $script:bridgeJob=$null
+        Assert-That ($TaskCombo.SelectedIndex -eq -1 -and $script:threadId -eq $taskA.threadId) 'Blocked selection displayed an unconnected destination.'
+        $script:recMode='transcribing'; $TaskCombo.SelectedItem=$taskB; $script:recMode='idle'
         Assert-That ((Count-Effect 'bridge') -eq $before) 'Binding bypassed the in-flight guard.'
+        Assert-That ($TaskCombo.SelectedIndex -eq -1) 'Recording-blocked selection was queued or remained selected.'
     }
     Test-Case 'all waveform styles and sizes synchronize without stopping playback' {
         $before=Count-Effect 'stop'

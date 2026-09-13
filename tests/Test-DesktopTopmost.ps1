@@ -61,10 +61,13 @@ function New-TestWindow([string]$Name,[int]$Offset) {
     return $view
 }
 function Assert-ManagedTopmost([bool]$Expected) {
-    foreach ($view in @($shell.Window,$shell.CaptionWindow,$shell.SettingsWindow)) {
+    foreach ($view in @($shell.Window,$shell.CaptionWindow)) {
         Assert-That ($view.Topmost -eq $Expected) ($view.Name+' WPF Topmost disagrees with the preference.')
         Assert-That ([TopmostTestNative]::IsTopmost((Handle $view)) -eq $Expected) ($view.Name+' native WS_EX_TOPMOST disagrees with the preference.')
     }
+    Assert-That (-not $shell.SettingsWindow.Topmost) 'Settings must never inherit the WPF pin preference.'
+    Assert-That (-not [TopmostTestNative]::IsTopmost((Handle $shell.SettingsWindow))) 'Settings must remain native non-topmost.'
+    Assert-That ($null -eq $shell.SettingsWindow.Owner) 'Settings must not inherit native topmost from a floating owner.'
 }
 
 try {
@@ -89,7 +92,7 @@ try {
     Pump
     Assert-ManagedTopmost $true
     Assert-That $manager.TimerRunning 'Visible pinned windows should start the watchdog.'
-    Assert-That ([TopmostTestNative]::IsAbove((Handle $settings),(Handle $main))) 'Owned settings must remain above the floating owner.'
+    Assert-That ([TopmostTestNative]::IsAbove((Handle $main),(Handle $settings))) 'Normal settings unexpectedly entered the floating topmost group.'
     Assert-That ([TopmostTestNative]::IsAbove((Handle $caption),(Handle $main))) 'Owned captions must remain above the floating owner.'
     [void]$normal.Activate(); Pump
     $normalForeground=([TopmostTestNative]::GetForegroundWindow() -eq (Handle $normal))
@@ -111,6 +114,15 @@ try {
     Assert-ManagedTopmost $true
     Assert-That ([TopmostTestNative]::GetForegroundWindow() -eq $focus) 'Repairing native drift stole focus.'
 
+    # A stale native pin or owner must not reintroduce always-on-top settings.
+    # Every fixture below belongs to this isolated test process.
+    $settings.Owner=$main
+    [TopmostTestNative]::SetOwnedTopmost((Handle $settings),$true)
+    Assert-That ([TopmostTestNative]::IsTopmost((Handle $settings))) 'Settings native drift fixture was not applied.'
+    $manager.Refresh()
+    Assert-ManagedTopmost $true
+    Assert-That ([TopmostTestNative]::GetForegroundWindow() -eq $focus) 'Repairing settings native drift stole focus.'
+
     # Healthy state must not continuously fight another owned topmost window.
     $peer.Topmost=$true; $peer.Show(); Pump
     Assert-That ([TopmostTestNative]::IsAbove((Handle $peer),(Handle $main))) 'The other topmost fixture was not above the floating window.'
@@ -119,7 +131,10 @@ try {
     Assert-That ($manager.GetStatus().NativeUpdates -eq $before) 'Healthy native state repeatedly reordered topmost windows.'
     Assert-That ([TopmostTestNative]::IsAbove((Handle $peer),(Handle $main))) 'An unchanged foreground caused z-order fighting with another topmost window.'
 
-    $caption.Hide(); $settings.Hide(); $main.Hide(); Pump
+    $caption.Hide(); $main.Hide(); Pump
+    Assert-That ($settings.IsVisible -and -not $manager.TimerRunning) 'Settings alone must not run the floating topmost watchdog.'
+    Assert-ManagedTopmost $true
+    $settings.Hide(); Pump
     Assert-That (-not $manager.TimerRunning) 'The watchdog kept running after all managed windows were hidden.'
     $focus=[TopmostTestNative]::GetForegroundWindow()
     $main.Show(); $caption.Show(); $settings.Show(); Pump
@@ -142,7 +157,8 @@ try {
     $manager.Refresh()
     Assert-That ($manager.GetStatus().ForegroundRepairs -eq 1 -and $manager.GetStatus().NativeUpdates -gt $baseline) 'A changed foreign foreground did not cause one native group lift.'
     Assert-That ([TopmostTestNative]::IsAbove((Handle $main),(Handle $peer))) 'The bounded foreground lift did not raise the floating window above the test topmost peer.'
-    Assert-That ([TopmostTestNative]::IsAbove((Handle $settings),(Handle $caption))) 'The group lift placed the caption over settings.'
+    Assert-ManagedTopmost $true
+    Assert-That ([TopmostTestNative]::IsAbove((Handle $peer),(Handle $settings))) 'The group lift raised settings above a separate topmost fixture.'
     Assert-That ([TopmostTestNative]::GetForegroundWindow() -eq $focus) 'The bounded foreground lift stole focus.'
     $baseline=$manager.GetStatus().NativeUpdates
     foreach ($unused in 1..4) { $manager.Refresh() }
@@ -150,6 +166,10 @@ try {
     $script:foregroundSnapshot=New-Object ShengBan.Desktop.TopmostForeground((Handle $settings),[uint32]$PID)
     $manager.Refresh()
     Assert-That ($manager.GetStatus().NativeUpdates -eq $baseline) 'A change to our own settings unnecessarily reordered windows.'
+    $settings.WindowState='Minimized'; Pump
+    $settings.WindowState='Normal'; Pump
+    Assert-ManagedTopmost $true
+    Assert-That ($manager.GetStatus().NativeUpdates -eq $baseline) 'Changing settings window state unnecessarily raised the pinned group.'
 
     $menu.IsOpen=$true; Pump
     $script:foregroundSnapshot=New-Object ShengBan.Desktop.TopmostForeground((Handle $peer),[uint32]($PID+100000))

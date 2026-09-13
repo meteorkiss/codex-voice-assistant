@@ -23,11 +23,16 @@ function Test-TaskBindingResult($Result, [string]$TargetThreadId) {
         (Test-Path -LiteralPath $Result.rolloutPath -PathType Leaf))
 }
 
+function Test-TaskBindingSelectionHealthy {
+    return [bool]($script:connected -and -not $script:bindingReadError -and $script:bindingAvailability -notin @('archived','missing','unknown'))
+}
+
 function Sync-TaskBindingSelection {
     if (-not $TaskCombo) { return }
     $wasSyncing=$script:syncingUi; $script:syncingUi=$true
     try {
         $TaskCombo.SelectedIndex=-1
+        if (-not (Test-TaskBindingSelectionHealthy)) { return }
         foreach ($item in $TaskCombo.Items) {
             if ($item.threadId -ceq $script:threadId) { $TaskCombo.SelectedItem=$item; break }
         }
@@ -50,6 +55,7 @@ function Invoke-TaskBindingCommit {
         Apply-Thread $Result
         if ($AfterApply) { & $AfterApply }
         Sync-TaskBindingSelection
+        $script:taskSelectionMessage=''
     } catch {
         # Persisting either settings or the caller's connection receipt can fail.
         # Restore the former destination before returning that failure.
@@ -68,7 +74,8 @@ function Invoke-TaskBindingCommit {
     }
 }
 
-function Reset-ManualTaskBinding([string]$Message='') {
+function Reset-ManualTaskBinding {
+    param([string]$Message='', [switch]$KeepSelection)
     $pending=$script:manualTaskBinding
     $script:manualTaskBinding=$null
     if (-not $pending) { return }
@@ -78,11 +85,15 @@ function Reset-ManualTaskBinding([string]$Message='') {
         Close-Job $job -Kill
     }
     if ($Message) { $script:notice=$Message }
+    if ($pending.AutoConnect -and -not $KeepSelection) {
+        Sync-TaskBindingSelection
+        if ($Message) { $script:taskSelectionMessage=$Message+' 未切换，请重新选择任务。' }
+    }
 }
 
 function Begin-ManualTaskBinding {
-    param([string]$TargetThreadId, [switch]$Startup)
-    Reset-ManualTaskBinding
+    param([string]$TargetThreadId, [switch]$Startup, [switch]$AutoConnect)
+    Reset-ManualTaskBinding -KeepSelection
     $blocked=Get-TaskBindingBlockReason -IgnoreDraft
     if ($blocked) { $script:notice=$blocked; return $false }
     if ($script:bridgeJob) { $script:notice='上一项操作仍在处理，请稍后连接。'; return $false }
@@ -90,20 +101,32 @@ function Begin-ManualTaskBinding {
     if (-not [Guid]::TryParse($TargetThreadId,[ref]$id)) { $script:notice='请先选择一个有效的本机任务。'; return $false }
     if (-not $Startup) {
         if (-not $TaskCombo.SelectedItem -or $TaskCombo.SelectedItem.threadId -cne $TargetThreadId) { return $false }
+        $selectedCandidate=$TaskCombo.SelectedItem
         if ($InputBox -and $InputBox.Text.Trim()) {
             if (-not (Save-InputDraftForRecovery '用户明确连接所选任务，旧文字未转发')) { return $false }
         }
         Invalidate-VoiceTaskCreateBinding -Reason '已手动选择要连接的任务' -ReleaseSendBlock
         Reset-VoiceTaskSwitch
+        if ($AutoConnect) {
+            # Ending a voice ambiguity prompt restores its old list. Keep the
+            # user's explicit choice visible throughout this read transaction.
+            $wasSyncing=$script:syncingUi; $script:syncingUi=$true
+            try {
+                $displayCandidate=$null
+                foreach ($item in $TaskCombo.Items) { if ($item.threadId -ceq $TargetThreadId) { $displayCandidate=$item; break } }
+                if (-not $displayCandidate) { $displayCandidate=$selectedCandidate; [void]$TaskCombo.Items.Add($displayCandidate) }
+                $TaskCombo.SelectedItem=$displayCandidate
+            } finally { $script:syncingUi=$wasSyncing }
+        }
     }
     $context=@{Token=[Guid]::NewGuid().ToString('N');TargetThreadId=$TargetThreadId;
         SourceThreadId=[string]$script:threadId;VoiceGeneration=$script:voiceGeneration;
-        Startup=[bool]$Startup;ExpiresAt=[DateTime]::UtcNow.AddSeconds(30)}
+        Startup=[bool]$Startup;AutoConnect=[bool]$AutoConnect;ExpiresAt=[DateTime]::UtcNow.AddSeconds(30)}
     $script:manualTaskBinding=$context
     try {
         if (-not (Start-Bridge @{action='read';threadId=$TargetThreadId} 'bind')) { throw '连接未开始。' }
         $script:bridgeJob.TaskBindingContext=$context.Clone()
-        $script:notice='正在确认目标任务，现有文字和连接保持不变…'
+        $script:notice='正在确认目标任务，确认成功后才切换连接…'
         return $true
     } catch {
         Reset-ManualTaskBinding
@@ -117,6 +140,9 @@ function Get-ManualTaskBindingStaleReason($Pending) {
     if ($blocked) { return $blocked }
     if ($Pending.SourceThreadId -cne [string]$script:threadId -or $Pending.VoiceGeneration -ne $script:voiceGeneration) {
         return '已有新的输入或任务变化，已取消这次连接。'
+    }
+    if ($Pending.AutoConnect -and (-not $TaskCombo.SelectedItem -or $TaskCombo.SelectedItem.threadId -cne $Pending.TargetThreadId)) {
+        return '目标选择已改变，已取消这次连接。'
     }
     if ($Pending.ExpiresAt -le [DateTime]::UtcNow) { return '连接等待已超时，保留原任务。' }
     return ''
@@ -143,10 +169,16 @@ function Complete-ManualTaskBinding {
             if ($Result.title) { $TaskLabel.Text=[string]$Result.title; $TaskLabel.ToolTip=[string]$Result.title }
             [void](Enter-TaskBindingRecovery 'archived')
         } else { $script:notice='所选任务已归档，未连接；请选择活动任务。' }
+        if ($pending.AutoConnect) { Sync-TaskBindingSelection; $script:taskSelectionMessage=$script:notice }
         return $false
     }
     try { Invoke-TaskBindingCommit $Result $pending.TargetThreadId }
-    catch { $script:notice='连接没有完成或保存失败，已保留原任务，请重试。'; return $false }
+    catch {
+        $script:notice='连接没有完成或保存失败，已保留原任务，请重新选择。'
+        if ($pending.AutoConnect) { Sync-TaskBindingSelection; $script:taskSelectionMessage=$script:notice }
+        return $false
+    }
+    $script:taskSelectionMessage=''
     $script:notice='任务已连接，接下来的话会发送到这个任务。'
     return $true
 }

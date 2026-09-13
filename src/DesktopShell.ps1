@@ -241,7 +241,8 @@ function New-DesktopShell {
     $settings.Add_Closing({ param($sender,$eventArgs) if (-not $sender.Tag.AllowClose) { $eventArgs.Cancel=$true; $sender.Hide() } })
     $caption.Add_Closing({ param($sender,$eventArgs) if (-not $sender.Tag.AllowClose) { $eventArgs.Cancel=$true; $sender.Hide() } })
     foreach ($view in @($window,$settings,$caption)) { $view.Add_Closed({ param($sender,$eventArgs) $sender.Tag.ClosedWindows[$sender.Name]=$true }) }
-    $window.Add_SourceInitialized({ param($sender,$eventArgs) $ui=$sender.Tag; $ui.SettingsWindow.Owner=$sender; $ui.CaptionWindow.Owner=$sender; Set-DesktopShellPosition $ui $sender.Left $sender.Top })
+    # Settings must not inherit the floating window's native topmost band.
+    $window.Add_SourceInitialized({ param($sender,$eventArgs) $ui=$sender.Tag; $ui.CaptionWindow.Owner=$sender; Set-DesktopShellPosition $ui $sender.Left $sender.Top })
     [void](New-Object Windows.Interop.WindowInteropHelper($window)).EnsureHandle()
     $wave.SetFrame('rays',0,'idle',0)
     Set-DesktopCenterControlsSize $shell 260
