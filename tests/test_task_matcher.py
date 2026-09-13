@@ -169,6 +169,82 @@ class TitleMatchingTests(unittest.TestCase):
             out = matcher.match_tasks('声伴 6.17', [expected])
         self.assertEqual(out['threads'], [expected])
 
+    def test_observed_product_alias_requires_version_and_preserves_original_query_and_title(self):
+        expected = task('声伴 v0.6.17 · 短时连续接话')
+        for query in ('申办0.6.17', '申办 6.17', '6.17 申办', '申办 ｖ０．６．１７'):
+            with self.subTest(query=query):
+                out = matcher.match_tasks(query, [expected])
+                self.assertEqual((out['matchType'], out['matchMethod']), ('unique', 'known_alias'))
+                self.assertEqual(out['query'], query)
+                self.assertIs(out['threads'][0], expected)
+                self.assertEqual(out['threads'][0]['title'], '声伴 v0.6.17 · 短时连续接话')
+
+    def test_product_alias_is_not_tied_to_one_version_or_task_id(self):
+        for version in ('v2', 'v1.2.3', '0.7.19'):
+            with self.subTest(version=version):
+                expected = task('声伴' + version + ' · 新版')
+                out = matcher.match_tasks('申办' + version, [expected])
+                self.assertEqual((out['matchType'], out['matchMethod']), ('unique', 'known_alias'))
+                self.assertEqual(out['threads'], [expected])
+
+    def test_literal_alias_names_always_precede_product_correction(self):
+        product = task('声伴 v0.6.17 · 短时连续接话')
+        for title, query, method in (
+                ('申办0.6.17', '申办0.6.17', 'exact'),
+                ('普通申办0.6.17项目', '申办0.6.17', 'contains'),
+                ('申办 · 项目说明 · v0.6.17', '申办 6.17', 'keywords')):
+            with self.subTest(title=title):
+                expected = task(title)
+                out = matcher.match_tasks(query, [product, expected])
+                self.assertEqual((out['matchType'], out['matchMethod']), ('unique', method))
+                self.assertEqual(out['threads'], [expected])
+
+    def test_product_alias_cannot_drop_additional_keywords(self):
+        expected = task('声伴 v0.6.17 · 短时连续接话')
+        other = task('声伴 v0.6.17 · 安装')
+        out = matcher.match_tasks('申办 6.17 短时', [other, expected])
+        self.assertEqual((out['matchType'], out['matchMethod']), ('unique', 'known_alias'))
+        self.assertEqual(out['threads'], [expected])
+        for query in ('申办 6.17 不存在', '申办 6.17 短时 不存在'):
+            with self.subTest(query=query):
+                self.assertEqual(matcher.match_tasks(query, [expected])['matchType'], 'none')
+
+    def test_product_alias_never_guesses_or_corrects_version_digits(self):
+        for query in ('申办6.117', '申办0.6.117', '申办617', '申办v617',
+                      '申办 16.17', '申办 0.6.170', '申办 6.17.1'):
+            with self.subTest(query=query):
+                self.assertEqual(matcher.match_tasks(
+                    query, [task('声伴 v0.6.17 · 短时连续接话')])['matchType'], 'none')
+        for title in ('声伴 v0.6.170', '声伴 v6.17.1', '声伴 v0.6.17.1', '声伴 v16.17'):
+            with self.subTest(title=title):
+                self.assertEqual(matcher.match_tasks('申办6.17', [task(title)])['matchType'], 'none')
+        exact_wrongly_heard_version = task('声伴 v0.6.117')
+        self.assertEqual(matcher.match_tasks('申办6.117', [exact_wrongly_heard_version])['threads'],
+                         [exact_wrongly_heard_version])
+
+    def test_product_alias_only_replaces_whole_product_terms(self):
+        for query, title in (('申办', '声伴'), ('申办', '声伴 v0.6.17'),
+                             ('申办项目0.6.17', '声伴项目 v0.6.17'),
+                             ('申办0.6.17', '无声伴奏 v0.6.17'),
+                             ('申办0.6.17', '声伴侣 v0.6.17'),
+                             ('神办0.6.17', '声伴 v0.6.17')):
+            with self.subTest(query=query, title=title):
+                self.assertEqual(matcher.match_tasks(query, [task(title)])['matchType'], 'none')
+
+    def test_product_alias_ambiguity_keeps_all_matches_and_existing_cap(self):
+        rows = [task(f'声伴 v0.6.17 · 方案 {number}') for number in range(8)]
+        out = matcher.match_tasks('申办6.17', rows)
+        self.assertEqual((out['matchType'], out['matchMethod'], out['totalMatches']),
+                         ('ambiguous', 'known_alias', 8))
+        self.assertEqual(out['threads'], rows[:5])
+
+    def test_product_alias_does_not_enable_generic_two_han_phonetics(self):
+        with patch.object(matcher, 'phonetic_units', side_effect=AssertionError('not needed')):
+            self.assertEqual(matcher.match_tasks('申办', [task('声伴 v0.6.17')])['matchType'], 'none')
+            self.assertEqual(matcher.match_tasks('高思6.17', [task('高斯 v0.6.17')])['matchType'], 'none')
+            self.assertEqual(matcher.match_tasks('申办6.17', [task('声伴 v0.6.17')])['matchMethod'],
+                             'known_alias')
+
     def test_syllables_do_not_merge_across_character_boundaries(self):
         self.assertEqual(matcher.match_tasks('西安设', [task('先设计工具')])['matchType'], 'none')
 

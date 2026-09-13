@@ -1,7 +1,8 @@
 """Conservative, title-only matching for local Codex task candidates.
 
 Matching precedence is normalized full title, literal title substring, explicit
-keyword intersection, then an exact window of Mandarin syllables (tones ignored).
+keyword intersection, a version-qualified known product alias, then an exact
+window of Mandarin syllables (tones ignored).
 No edit distance, initials, word dropping, title-summary search, or task switching
 is performed here. A bare two-part version can omit only the zero major version.
 """
@@ -14,6 +15,7 @@ MAX_QUERY_LENGTH = 200
 MAX_CANDIDATES = 5
 MIN_PHONETIC_HAN = 3
 VERSION_TOKEN = re.compile(r'v[0-9]+(?:\.[0-9]+)*|[0-9]+(?:\.[0-9]+)+')
+VERSIONED_PRODUCT_ALIASES = {'申办': '声伴'}
 
 
 class TaskMatchError(ValueError):
@@ -123,6 +125,29 @@ def keyword_terms(query):
     return terms
 
 
+def keywords_match(terms, title, title_versions):
+    return bool(terms) and all(
+        any(version_matches(term, title_version) for title_version in title_versions)
+        if is_version else term in title
+        for term, is_version in terms)
+
+
+def known_alias_terms(terms):
+    """One observed ASR product alias, only with an explicit version token.
+
+    Both product names must remain whole keyword terms: never replace part of
+    a longer name, remove another keyword, or correct any version digit.
+    """
+    if not any(is_version for _, is_version in terms):
+        return [], set()
+    replacements = {term: VERSIONED_PRODUCT_ALIASES[term] for term, is_version in terms
+                    if not is_version and term in VERSIONED_PRODUCT_ALIASES}
+    if not replacements:
+        return [], set()
+    return ([(replacements.get(term, term) if not is_version else term, is_version)
+             for term, is_version in terms], set(replacements.values()))
+
+
 def match_tasks(query, threads):
     """Return original candidates in index order, capped at five on ambiguity.
 
@@ -153,11 +178,14 @@ def match_tasks(query, threads):
     if not matches:
         method = 'keywords'
         matches = [thread for thread, title, title_versions in titled
-                   if terms and all(
-                       any(version_matches(term, title_version)
-                           for title_version in title_versions)
-                       if is_version else term in title
-                       for term, is_version in terms)]
+                   if keywords_match(terms, title, title_versions)]
+    if not matches:
+        alias_terms, products = known_alias_terms(terms)
+        if alias_terms:
+            method = 'known_alias'
+            matches = [thread for thread, title, title_versions in titled
+                       if all((product, False) in keyword_terms(thread['title']) for product in products)
+                       and keywords_match(alias_terms, title, title_versions)]
     if not matches and titled and sum(is_han(char) for char in normalized) >= MIN_PHONETIC_HAN:
         method = 'phonetic'
         needle = phonetic_units(normalized)

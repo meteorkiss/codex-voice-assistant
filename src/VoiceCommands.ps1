@@ -138,6 +138,8 @@ function Get-AssistantTaskVoiceCommand {
     $candidate=[regex]::Replace($candidate,'(?:\s*一下)?(?:\s*吧)?(?:\s*[，,]?\s*谢谢)?\z','').Trim()
     if (-not $candidate -or $candidate -match '[，,、]' -or $candidate -match '(?:不要|不用|别|不想|不需要|不能|不可以|不许|不准|是否|能否|可不可以|能不能)') { return $null }
     if ($candidate -match '(?:然后|接着|并且|同时|顺便|以及|或者|还是|(?:并|再|和|且)(?:帮我|给我|替我|请|切|打|关|显|隐|回|查|删|发|执行|总结|整理|保存|停止|开始|设置|运行|重启|继续|分析|生成|解释|修改|创建|新建|读|播放|朗读|调|写)|任务(?:帮我|给我|替我|请|之前|之后|以后|前|后))') { return $null }
+    # "新开" is a supported create verb, not part of a compound switch target.
+    if ($candidate -match '(?:并|再|和|且)\s*(?:帮我|给我|替我|请)?\s*新开') { return $null }
     if ($candidate -match '(?:比如|例如|如果|假设|只是|仅为|仅是|只作|只做|仅做|只用于|仅用于|用于测试|用来测试|用作测试|做个测试|做一次测试|测试一下|测试说明|测试口令|测试用|不实际|什么意思|怎么|如何|为什么)' -or $candidate -match '[吗么呢]\z') { return $null }
     $selection=[regex]::Match($candidate,'\A选择第\s*([一二三四五1-5])\s*个(?:任务)?\z')
     if ($selection.Success) {
@@ -148,7 +150,14 @@ function Get-AssistantTaskVoiceCommand {
     if ($candidate -ceq '连接刚才的新任务') { return [pscustomobject]@{Action='resumeCreatedTask';Value=$true} }
     if ($candidate -ceq '放弃连接新任务') { return [pscustomobject]@{Action='cancelCreatedTaskConnection';Value=$true} }
     $switchVerb='(?:切换到|切换刀|切到|切刀)'
-    $switch=[regex]::Match($candidate,('\A'+$switchVerb+'\s*(?<query>.+?)(?:的这个|这个|的)?任务\z'))
+    # Spoken object-first requests are explicitly about task binding, so they
+    # do not need the trailing task noun or the bare-title settings fallback.
+    # Keep the target's spelling/version exactly as heard; lookup owns failure.
+    $switch=[regex]::Match($candidate,('\A把\s*(?:任务|对话|聊天(?:内容)?)\s*'+$switchVerb+'\s*(?<query>.+)\z'))
+    $frontedTask=$switch.Success
+    if (-not $switch.Success) {
+        $switch=[regex]::Match($candidate,('\A'+$switchVerb+'\s*(?<query>.+?)(?:的这个|这个|的)?任务\z'))
+    }
     # A version-qualified task title may omit "任务". Keep bare generic
     # "切换到台湾女声" in the settings parser and ordinary prose unchanged.
     if (-not $switch.Success) {
@@ -161,10 +170,20 @@ function Get-AssistantTaskVoiceCommand {
     }
     if (-not $switch.Success) { return $null }
     $query=$switch.Groups['query'].Value.Trim()
+    if ($frontedTask) {
+        # A single colloquial demonstrative addresses the following concrete
+        # name. Never turn "this/that task" alone into a guessed identity.
+        $query=[regex]::Replace($query,'\A(?:这个|那个)\s*(?=\S)','')
+        # The object already declares a task lookup. Only explicit separating
+        # markers denote a trailing noun; keep names such as "语音对话" and
+        # "新任务" intact instead of silently broadening them to another title.
+        $query=[regex]::Replace($query,'(?:\s+|的这个|这个|的)(?:任务|对话|聊天(?:内容)?)\z','').Trim()
+        if ($query -match '\A(?:(?:这|那|这个|那个|当前|之前|上一个|下一个)?(?:任务|对话|聊天(?:内容)?))\z') { return $null }
+    }
     if (-not $query -or $query -match '\A(?:任务|这|那|这个|那个|当前|之前|上一个|下一个)\z') { return $null }
     # Without the task noun there is no explicit end marker. Keep apparent
     # extra instructions and unresolved references out of this lookup route.
-    if ($bareTitle -and $query -match '(?:帮我|给我|替我|请|之前|之后|以后|刚才那个|刚才的|那个任务|这个任务)') { return $null }
+    if (($bareTitle -or $frontedTask) -and $query -match '(?:帮我|给我|替我|请|之前|之后|以后|刚才那个|刚才的|那个任务|这个任务)') { return $null }
     if ($query -notmatch '\A[\p{L}\p{N}\p{M}\s_\-－.．·]+\z') { return $null }
     return [pscustomobject]@{Action='switchTask';Value=$query}
 }

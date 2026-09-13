@@ -157,7 +157,7 @@ function Complete-VoiceTaskSearch {
     }
     if ($Result.matchType -eq 'none' -and $candidates.Count -eq 0) {
         Reset-VoiceTaskSwitch
-        Set-VoiceTaskSwitchNotice '没有找到匹配任务，请换一个任务名称，或在设置里选择。' $true
+        Set-VoiceTaskSwitchNotice ('没有找到与“'+[string]$pending.Query+'”匹配的任务，未切换。请重说任务名称，或在设置里选择。') $true
         return $true
     }
     if ($Result.matchType -eq 'unique' -and $candidates.Count -eq 1) {

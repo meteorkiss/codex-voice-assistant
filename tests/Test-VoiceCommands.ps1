@@ -95,6 +95,57 @@ foreach($entry in @(
  @('切到高斯泼溅','高斯泼溅'),@('帮我切刀高斯泼溅','高斯泼溅'),
  @('切到高斯泼溅 性能优化','高斯泼溅 性能优化')
 )) { Assert-Command $entry[0] 'switchTask' $entry[1] }
+# The reported object-first utterances must be consumed locally. In particular
+# 6.117 is not corrected to 6.17 here; strict lookup decides whether it exists.
+foreach($entry in @(
+ @('把任务切到这个申办0.6.17。','申办0.6.17'),
+ @('把任务切到6.117。','6.117'),
+ @('把任务切到声伴0.6.17','声伴0.6.17'),
+ @('把任务切换到那个声伴 6.17 任务','声伴 6.17'),
+ @('声伴，请你帮我把任务切到这个声伴 6.17 吧，谢谢。','声伴 6.17'),
+ @('你帮我把对话切到高斯泼溅','高斯泼溅'),
+ @('请把聊天切换到那个 Gaussian Splatting 对话','Gaussian Splatting'),
+ @('把聊天内容切刀声伴 ｖ０．６．１７','声伴 ｖ０．６．１７'),
+ @('把 任务 切换到 这个 声伴 V 0 . 6 . 17','声伴 V 0 . 6 . 17'),
+ @('把对话切到高斯  泼溅的这个任务','高斯  泼溅'),
+ @('把任务切到台湾女声','台湾女声')
+)) { Assert-Command $entry[0] 'switchTask' $entry[1] }
+# A fronted object must not erase real words from the requested title. These
+# complete title fixtures could coexist with shorter names such as "语音";
+# only the original full title is passed to lookup, so exact matching can win.
+foreach($title in @('语音对话','新任务','高斯聊天内容','语音助手任务','声伴0.6.17任务')) {
+ Assert-Command ('把任务切到'+$title) 'switchTask' $title
+ Assert-Command ('把对话切到这个'+$title) 'switchTask' $title
+}
+foreach($text in @(
+ '把任务切到6.17并新开对话','把任务切到6.17再新开一个任务',
+ '把对话切到声伴0.6.17且新开聊天','把聊天切到高斯泼溅和新开一个对话',
+ '把任务切到6.17并帮我新开对话','把任务切到6.17再 请 新开一个任务',
+ '切到6.17并新开对话','切到声伴0.6.17任务再新开一个任务',
+ '把任务切到当前对话','把任务切到那个聊天内容'
+)) { Assert-Routed $text }
+foreach($noun in @('任务','对话','聊天','聊天内容')) {
+ foreach($verb in @('切到','切换到','切刀','切换刀')) {
+  Assert-Command ('把'+$noun+$verb+'声伴 6.17') 'switchTask' '声伴 6.17'
+  Assert-Command ('帮我把'+$noun+$verb+'这个高斯泼溅') 'switchTask' '高斯泼溅'
+ }
+ foreach($text in @(
+  ('不要把'+$noun+'切到6.17'),('帮我不要把'+$noun+'切到6.17'),
+  ('把'+$noun+'切到6.17吗'),('把'+$noun+'切到6.17？'),
+  ('怎么把'+$noun+'切到6.17'),('能不能把'+$noun+'切到6.17'),
+  ('“把'+$noun+'切到6.17”'),('我说的是把'+$noun+'切到6.17'),
+  ('如果把'+$noun+'切到6.17'),('把'+$noun+'切到6.17是什么意思'),
+  ('把'+$noun+'切到6.17只是测试'),('把'+$noun+'切到6.17然后打开设置'),
+  ('把'+$noun+'切到6.17并显示字幕'),('把'+$noun+'切到6.17再帮我查天气'),
+  ('把'+$noun+'切到6.17帮我查天气'),('把'+$noun+'切到6.17，打开设置'),
+  ('把'+$noun+'切到6.17。显示字幕'),('把'+$noun+'切到6.17.显示字幕'),
+  ('把'+$noun+'切到这个任务'),('把'+$noun+'切到那个对话'),
+  ('把'+$noun+'切到那个'),('把'+$noun+'切到刚才那个任务'),
+  ('把'+$noun+'切到声伴.6.17'),('把'+$noun+'切到6..17')
+ )) { Assert-Routed $text }
+}
+Assert-Routed "把任务切到6.17`n打开设置"
+if ((Get-AssistantTaskVoiceCommand '把任务切到这个申办0.6.17。').Value -cne '申办0.6.17') { throw 'Explicit object-first request must be handled before the bare-title fallback.' }; $checks++
 foreach($text in @(
  '不要切到6.17','别切刀声伴6.17','帮我不要切到声伴 6.17',
  '切到6.17吗','切到声伴 6.17？','怎么切到6.17','能否切到6.17',
