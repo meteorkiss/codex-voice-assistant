@@ -502,6 +502,11 @@ try {
                             # text, so the normal edit handler does not cancel this turn.
                             if ($job.VoiceSource) { Start-ShortFollowUpWait ([string]$job.VoiceSource) $job.FollowUpGeneration $job.Request.threadId $job.UserTurnBaseline }
                             $script:busy=$true; $script:notice='已发送，Codex 正在处理…'; $InputBox.Text=''
+                            Complete-EarlyShortFollowUpAnswer $job
+                        } elseif ($job.VoiceSource -and (Test-ShortFollowUpGeneration $job.FollowUpGeneration $job.Request.threadId)) {
+                            # A receipt may settle its ledger without owning the
+                            # current binding/input. Retire only its old exchange.
+                            Close-ShortFollowUp
                         }
                     }
                     else { if ($job.VoiceSource -and (Test-ShortFollowUpGeneration $job.FollowUpGeneration $job.Request.threadId)) { Close-ShortFollowUp }; $script:notice='发送回执不完整，请先到 Codex 核对，程序不会重发。' }
@@ -519,8 +524,10 @@ try {
                     $AnswerBox.Text=$answer.Text; $AnswerBox.ScrollToHome()
                     if ($answer.UserTurnVersion -eq $script:tail.UserTurnVersion) {
                         $script:busy=$false; $script:notice='回答完成。'
-                        if ($script:autoRead) { Queue-AnswerSpeech $answer.Text }
-                        if (Get-Command Register-ShortFollowUpAnswer -ErrorAction SilentlyContinue) { Register-ShortFollowUpAnswer $answer }
+                        if (-not (Save-EarlyShortFollowUpAnswer $answer)) {
+                            if ($script:autoRead) { Queue-AnswerSpeech $answer.Text }
+                            if (Get-Command Register-ShortFollowUpAnswer -ErrorAction SilentlyContinue) { Register-ShortFollowUpAnswer $answer }
+                        }
                     }
                 }
             }

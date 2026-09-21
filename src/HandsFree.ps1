@@ -77,6 +77,47 @@ function Register-ShortFollowUpAnswer($Answer) {
     $session.Deadline=[DateTime]::UtcNow.AddMinutes(2)
 }
 
+function Save-EarlyShortFollowUpAnswer($Answer) {
+    # Transcript completion may beat the pipe receipt. Keep reading/displaying
+    # normally, but hold this answer's playback on its exact in-flight job.
+    # No recording or playback is authorized by an unconfirmed send.
+    $job=$script:bridgeJob
+    if (-not $script:shortFollowUpEnabled -or -not $script:handsFreeEnabled -or -not $script:autoRead -or
+        -not $job -or $job.Purpose -ne 'send' -or $job.VoiceSource -notin @('wake','follow-up') -or
+        -not $job.Process -or
+        -not $script:pendingUncertain -or $job.Request.requestId -cne $script:pendingUncertain -or
+        -not (Test-ShortFollowUpGeneration $job.FollowUpGeneration $job.Request.threadId) -or
+        $job.BindingGeneration -ne $script:bindingGeneration -or $job.InputGeneration -ne $script:voiceGeneration -or
+        $job.VoiceGeneration -ne $script:voiceGeneration -or $job.Request.text -cne $InputBox.Text.Trim() -or
+        $null -eq $job.UserTurnBaseline -or $job.UserTurnBaseline -lt 0 -or
+        -not $Answer -or $null -eq $Answer.UserTurnVersion -or $Answer.UserTurnVersion -le $job.UserTurnBaseline) { return $false }
+    $job.EarlyFollowUpAnswer=@{Answer=$Answer;RequestId=$job.Request.requestId;ThreadId=$job.Request.threadId;
+        BindingGeneration=$job.BindingGeneration;InputGeneration=$job.InputGeneration;VoiceGeneration=$job.VoiceGeneration;
+        FollowUpGeneration=$job.FollowUpGeneration;UserTurnBaseline=$job.UserTurnBaseline}
+    return $true
+}
+
+function Complete-EarlyShortFollowUpAnswer($Job) {
+    # Called only after a matching accepted receipt, Start-ShortFollowUpWait
+    # and safe draft clearing. The receipt does not re-read or replay history.
+    $early=$Job.EarlyFollowUpAnswer
+    if (-not $early) { return }
+    $Job.Remove('EarlyFollowUpAnswer')
+    if (-not $script:shortFollowUp -or $script:shortFollowUp.Phase -ne 'waiting-answer') { return }
+    if ($early.RequestId -cne $Job.Request.requestId -or $early.ThreadId -cne $Job.Request.threadId -or
+        $early.BindingGeneration -ne $Job.BindingGeneration -or $early.InputGeneration -ne $Job.InputGeneration -or
+        $early.VoiceGeneration -ne $Job.VoiceGeneration -or $early.FollowUpGeneration -ne $Job.FollowUpGeneration -or
+        $early.UserTurnBaseline -ne $Job.UserTurnBaseline -or
+        $early.Answer.UserTurnVersion -ne $script:tail.UserTurnVersion) {
+        Close-ShortFollowUp
+        return
+    }
+    $script:busy=$false
+    $script:notice='回答完成。'
+    Register-ShortFollowUpAnswer $early.Answer
+    if ($script:autoRead) { Queue-AnswerSpeech $early.Answer.Text }
+}
+
 function Start-ShortFollowUpCapture([DateTime]$Now) {
     $session=$script:shortFollowUp
     if (-not $session -or $session.Phase -ne 'waiting-playback') { return }
@@ -102,12 +143,13 @@ function Start-ShortFollowUpCapture([DateTime]$Now) {
 
 function Test-ShortFollowUpSendInFlight($Session) {
     # The pending ledger protects every dispatched write, including one still
-    # owned by this live exchange. Only this exact in-flight request may wait;
-    # a missing/exited worker, another request or stale context remains blocked.
+    # owned by this exchange until Tick classifies its receipt. A worker can
+    # exit between Tick's receipt check and answer processing; do not revoke
+    # that exact request before the next tick can settle it.
     $job=$script:bridgeJob
     if (-not $Session -or $Session.Phase -ne 'dispatching' -or -not $job -or
         $job.Purpose -ne 'send' -or $job.VoiceSource -ne 'follow-up' -or
-        -not $job.Process -or $job.Process.HasExited -ne $false) { return $false }
+        -not $job.Process) { return $false }
     return [bool]($script:pendingUncertain -and $job.Request.requestId -ceq $script:pendingUncertain -and
         $job.Request.threadId -ceq $Session.ThreadId -and $Session.ThreadId -ceq $script:threadId -and
         $job.FollowUpGeneration -eq $Session.Generation -and

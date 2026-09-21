@@ -219,13 +219,17 @@ function Complete-FakeSend([bool]$Accepted=$true) {
     $receipt | ConvertTo-Json | Set-Content -LiteralPath $job.Output -Encoding UTF8
     $job.Process.HasExited=$true
 }
-function Read-NewCompletedAnswers($Tail) { $items=$script:pendingAnswers; $script:pendingAnswers=@(); return $items }
+function Read-NewCompletedAnswers($Tail) {
+    if ($script:exitSendOnRead -and $script:bridgeJob) { $script:bridgeJob.Process.HasExited=$true; $script:exitSendOnRead=$false }
+    $items=$script:pendingAnswers; $script:pendingAnswers=@(); return $items
+}
 function New-TranscriptTail([string]$Path) { return @{UserTurnVersion=0;Latest='Previous answer'} }
 function Begin-Speech([string]$Text) {
     $script:speechInputs += $Text
     Add-Trace ('tts:queued:'+ $Text)
     $script:audioPath='mock-final-answer.mp3'
     [CodexReader.AudioPlayer]::Play($script:audioPath)
+    if ($script:trackSpeechCompletion) { $script:spoken++; $script:lastSpeechEpoch=$script:epoch }
 }
 function Begin-Transcription([string]$WavePath,[bool]$SendAfter) {
     $path=Join-Path $fixtureRoot ([Guid]::NewGuid().ToString('N')+'.asr.json')
@@ -256,7 +260,7 @@ function Reset-Case {
     Initialize-TestDoubles
     $script:connected=$true; $script:threadId='11111111-1111-4111-8111-111111111111'
     $script:bindingReadError=''; $script:holdBridge=$false; $script:clearedSends=@()
-    $script:exercisePendingLedger=$false; $script:bindingGeneration=1
+    $script:exercisePendingLedger=$false; $script:bindingGeneration=1; $script:trackSpeechCompletion=$false; $script:exitSendOnRead=$false
     $script:recMode='idle'; $script:armDue=[DateTime]::MaxValue
     $script:manualRecorder=$null; $script:echoQuestionCapture=$false; $script:bargeInEnabled=$false
     $script:ttsJob=$null; $script:asrJob=$null; $script:bridgeJob=$null
@@ -341,7 +345,73 @@ function Open-ShortFollowUpCapture {
     Assert-That ($script:shortFollowUp.Phase -eq 'listening' -and $script:recMode -eq 'listening') 'Follow-up window did not become visibly active after microphone handoff.'
 }
 
+function Start-EarlyAnswerCase([string]$Source, [switch]$ExitDuringRead) {
+    Reset-Case; Start-WakeCase
+    $script:shortFollowUpEnabled=$true
+    if ($Source -eq 'follow-up') { Open-ShortFollowUpCapture }
+    $script:exercisePendingLedger=$true; $script:holdBridge=$true; $script:TestMode=$false
+    $script:trackSpeechCompletion=$true
+    if ($Source -eq 'follow-up') {
+        $script:nextTranscript='提前回答的接话问题'
+        $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-5)
+        $script:recorder.LastVoiceUtc=[DateTime]::UtcNow.AddSeconds(-2.2)
+        Tick-And-AssertHealthy; $script:recorder.Release(); Tick-And-AssertHealthy
+    } else { $InputBox.Text='提前回答的唤醒问题'; Send-Text 'wake' }
+    $script:tail.UserTurnVersion=$script:bridgeJob.UserTurnBaseline+1
+    $script:pendingAnswers=@([pscustomobject]@{UserTurnVersion=$script:tail.UserTurnVersion;Text='先于回执到达的回答'})
+    $script:lastTailRead=[DateTime]::MinValue
+    if ($ExitDuringRead) { Complete-FakeSend; $script:bridgeJob.Process.HasExited=$false; $script:exitSendOnRead=$true }
+    Tick-And-AssertHealthy
+    Assert-That ($script:latest -ceq '先于回执到达的回答' -and $script:received -eq 1 -and $script:pendingAnswers.Count -eq 0) 'Early answer was not displayed and consumed exactly once.'
+    Assert-That ($script:speechQueue.Count -eq 0 -and $script:speechInputs.Count -eq 0 -and -not $script:followUpCapture) 'Early answer played or opened capture before accepted receipt.'
+}
+
 try {
+    # Reversed transport order, for both the initial wake and a later follow-up.
+    foreach ($source in @('wake','follow-up')) {
+        Start-EarlyAnswerCase $source -ExitDuringRead
+        $script:wakeListener.Release(); Tick-And-AssertHealthy
+        Assert-That ($script:shortFollowUp.Phase -eq 'waiting-playback' -and $script:speechInputs.Count -eq 1 -and -not $InputBox.Text) 'Worker exit between receipt check and tail read lost its early answer.'
+        [CodexReader.AudioPlayer]::Finish(); Tick-And-AssertHealthy
+        Assert-That ($script:followUpCapture -and $script:shortFollowUp.Phase -eq 'preparing') 'Worker-exit race failed to open the next follow-up.'
+        foreach ($instant in @($false,$true)) {
+            Start-EarlyAnswerCase $source
+            foreach ($poll in 1..3) { Tick-And-AssertHealthy }
+            $script:wakeListener.Release()
+            [CodexReader.AudioPlayer]::FinishOnPlay=$instant
+            Complete-FakeSend; Tick-And-AssertHealthy
+            Assert-That (-not $InputBox.Text -and -not $script:pendingUncertain -and $script:sent -eq 1 -and $script:speechInputs.Count -eq 1) 'Early accepted answer was lost, duplicated or left its draft/ledger.'
+            if (-not $instant) {
+                Assert-That ($script:shortFollowUp.Phase -eq 'waiting-playback') 'Early answer was not associated with its playback.'
+                [CodexReader.AudioPlayer]::Finish(); Tick-And-AssertHealthy
+            }
+            Assert-That ($script:followUpCapture -and $script:shortFollowUp.Phase -eq 'preparing') 'Early answer completion failed to open follow-up (including immediate completion).'
+            $script:armDue=[DateTime]::UtcNow.AddMilliseconds(-1); Tick-And-AssertHealthy
+            Assert-That ($script:recMode -eq 'listening' -and $script:shortFollowUp.Phase -eq 'listening' -and $script:bridgeRequests.Count -eq 1) 'Early answer did not reach listening or caused a repeated send.'
+        }
+        foreach ($outcome in @('rejected','unknown','target','binding','input','voice','token','draft','cancel','disabled','later-turn')) {
+            Start-EarlyAnswerCase $source
+            switch ($outcome) {
+                'target' { $script:threadId='22222222-2222-4222-8222-222222222222' }
+                'binding' { $script:bindingGeneration++ }
+                'input' { $script:bridgeJob.InputGeneration-- }
+                'voice' { $script:voiceGeneration++ }
+                'token' { Close-ShortFollowUp }
+                'draft' { $InputBox.Text='要保留的新草稿' }
+                'cancel' { Stop-ShortFollowUpByUser }
+                'disabled' { $script:shortFollowUpEnabled=$false; Close-ShortFollowUp -CancelCapture }
+                'later-turn' { $script:tail.UserTurnVersion++; $script:lastUserVersion=$script:tail.UserTurnVersion }
+            }
+            $draft=$InputBox.Text
+            if ($outcome -eq 'rejected') { Complete-FakeSend $false }
+            elseif ($outcome -eq 'unknown') { $script:bridgeJob.Process.HasExited=$true }
+            else { Complete-FakeSend }
+            $script:wakeListener.Release(); Tick-And-AssertHealthy; Tick-And-AssertHealthy
+            Assert-That (-not $script:shortFollowUp -and -not $script:followUpCapture -and $script:speechInputs.Count -eq 0 -and $script:bridgeRequests.Count -eq 1) ('Invalid early answer replayed or rearmed: '+$source+'/'+$outcome)
+            if ($outcome -ne 'later-turn') { Assert-That ($InputBox.Text -ceq $draft) ('Invalid early receipt erased protected draft: '+$outcome) }
+        }
+    }
+
     # Exact race: the first half of a production timer tick observes playing;
     # the later generic audio cleanup observes stopped in the same tick.
     Reset-Case; Start-WakeCase; Activate-And-ReleaseWake
@@ -525,7 +595,8 @@ try {
             'deadline' { $script:shortFollowUp.Deadline=[DateTime]::UtcNow.AddSeconds(-1) }
             'cancel' { Stop-ShortFollowUpByUser }
         }
-        Update-ShortFollowUp ([DateTime]::UtcNow)
+        if ($mismatch -eq 'worker') { Tick-And-AssertHealthy }
+        else { Update-ShortFollowUp ([DateTime]::UtcNow) }
         Assert-That (-not $script:shortFollowUp -and $InputBox.Text -and $script:pendingUncertain -and $script:bridgeRequests.Count -eq 1) ('Uncertain or invalidated send bypassed protection: '+$mismatch)
         if ($mismatch -in @('text','cancel')) {
             $draft=$InputBox.Text
