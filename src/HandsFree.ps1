@@ -100,11 +100,29 @@ function Start-ShortFollowUpCapture([DateTime]$Now) {
     $script:notice='连续接话正在准备；不想继续可点“结束接话”。'
 }
 
+function Test-ShortFollowUpSendInFlight($Session) {
+    # The pending ledger protects every dispatched write, including one still
+    # owned by this live exchange. Only this exact in-flight request may wait;
+    # a missing/exited worker, another request or stale context remains blocked.
+    $job=$script:bridgeJob
+    if (-not $Session -or $Session.Phase -ne 'dispatching' -or -not $job -or
+        $job.Purpose -ne 'send' -or $job.VoiceSource -ne 'follow-up' -or
+        -not $job.Process -or $job.Process.HasExited -ne $false) { return $false }
+    return [bool]($script:pendingUncertain -and $job.Request.requestId -ceq $script:pendingUncertain -and
+        $job.Request.threadId -ceq $Session.ThreadId -and $Session.ThreadId -ceq $script:threadId -and
+        $job.FollowUpGeneration -eq $Session.Generation -and
+        (Test-ShortFollowUpGeneration $job.FollowUpGeneration $job.Request.threadId) -and
+        $job.VoiceGeneration -eq $script:voiceGeneration -and $job.InputGeneration -eq $script:voiceGeneration -and
+        $job.BindingGeneration -eq $script:bindingGeneration -and
+        $job.Request.text -ceq $Session.DraftText -and $job.Request.text -ceq $InputBox.Text.Trim())
+}
+
 function Update-ShortFollowUp([DateTime]$Now = [DateTime]::UtcNow) {
     $session=$script:shortFollowUp
     if (-not $session) { return }
     if ($script:closing -or -not $script:shortFollowUpEnabled -or -not $script:handsFreeEnabled -or
-        -not $script:connected -or $script:bindingReadError -or $session.ThreadId -cne [string]$script:threadId -or $script:pendingUncertain) {
+        -not $script:connected -or $script:bindingReadError -or $session.ThreadId -cne [string]$script:threadId -or
+        ($script:pendingUncertain -and -not (Test-ShortFollowUpSendInFlight $session))) {
         Close-ShortFollowUp '连续接话已结束。' -CancelCapture
         return
     }

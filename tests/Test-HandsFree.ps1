@@ -182,20 +182,33 @@ foreach ($name in @('Stop-Output','Test-FullDuplexReady','Safe-To-Play','Begin-R
 $ledgerAst=Read-ProductionAst (Join-Path $SourceRoot 'PendingSends.ps1')
 $receiptDefinition=$ledgerAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-SendReceiptState'},$true)
 . ([scriptblock]::Create($receiptDefinition.Extent.Text))
+$pendingFunctions=@{}
+foreach ($name in @('Sync-PendingSend','Clear-PendingSend','Set-PendingSend')) {
+    $definition=$ledgerAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $pendingFunctions[$name]=(Get-Item ('Function:'+ $name)).ScriptBlock
+}
+# Persistence alone is in-memory; new regressions use the actual ledger state
+# transitions, unlike the original bridge double that never set the send lock.
+function Save-PendingSends {}
 function Remove-OwnedFiles($Paths) { foreach ($path in @($Paths)) { if ($path) { $script:removed += $path } } }
 function Close-Job($Job,[switch]$Kill) { $script:killed += $Job }
 function Save-Settings {}
 function Sync-DesktopPreferences {}
 function Update-DesktopDisplay {}
 function Reconcile-PendingSends {}
-function Sync-PendingSend {}
-function Clear-PendingSend([string]$TargetThreadId) { $script:clearedSends += $TargetThreadId }
+function Sync-PendingSend { if ($script:exercisePendingLedger) { & $pendingFunctions['Sync-PendingSend'] } }
+function Clear-PendingSend([string]$TargetThreadId) {
+    $script:clearedSends += $TargetThreadId
+    if ($script:exercisePendingLedger) { & $pendingFunctions['Clear-PendingSend'] $TargetThreadId }
+}
 function Start-Bridge($Request,[string]$Purpose) {
     $script:bridgeRequests += $Request
     if ($script:holdBridge) {
         $path=Join-Path $fixtureRoot ([Guid]::NewGuid().ToString('N')+'.bridge-result.json')
         $script:fixtureFiles.Add($path)
-        $script:bridgeJob=@{Purpose=$Purpose;Request=$Request;Output=$path;Files=@($path);Process=[pscustomobject]@{HasExited=$false;ExitCode=0}}
+        $script:bridgeJob=@{Purpose=$Purpose;Request=$Request;Output=$path;Files=@($path);Process=[pscustomobject]@{HasExited=$false;ExitCode=0};BindingGeneration=$script:bindingGeneration;InputGeneration=$script:voiceGeneration}
+        if ($script:exercisePendingLedger) { Set-PendingSend @{threadId=$Request.threadId;requestId=$Request.requestId;text=$Request.text} }
     }
     return $true
 }
@@ -243,6 +256,7 @@ function Reset-Case {
     Initialize-TestDoubles
     $script:connected=$true; $script:threadId='11111111-1111-4111-8111-111111111111'
     $script:bindingReadError=''; $script:holdBridge=$false; $script:clearedSends=@()
+    $script:exercisePendingLedger=$false; $script:bindingGeneration=1
     $script:recMode='idle'; $script:armDue=[DateTime]::MaxValue
     $script:manualRecorder=$null; $script:echoQuestionCapture=$false; $script:bargeInEnabled=$false
     $script:ttsJob=$null; $script:asrJob=$null; $script:bridgeJob=$null
@@ -463,6 +477,75 @@ try {
     $script:nextTranscript='请继续解释第二种方法'; $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-5); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow.AddSeconds(-2.2)
     Tick-And-AssertHealthy; $script:recorder.Release(); $script:TestMode=$false; Tick-And-AssertHealthy
     Assert-That ($script:bridgeRequests.Count -eq 1 -and $script:bridgeRequests[0].threadId -eq $script:threadId -and $script:bridgeRequests[0].text -eq '请继续解释第二种方法') 'Clear follow-up did not dispatch once to its captured task.'
+
+    # Reported regression: Set-PendingSend marks even a healthy live request.
+    # Carry two whole follow-up turns through ASR, the actual pending policy,
+    # delayed acknowledgement, answer reading, speech and the next capture.
+    Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+    $script:exercisePendingLedger=$true; $script:holdBridge=$true; $script:TestMode=$false
+    foreach ($round in 1..2) {
+        $spokenText='合成连续接话第'+$round+'轮'
+        $script:nextTranscript=$spokenText
+        $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-5); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow.AddSeconds(-2.2)
+        Tick-And-AssertHealthy; $script:recorder.Release(); Tick-And-AssertHealthy
+        $token=$script:shortFollowUpGeneration
+        Assert-That ($script:pendingUncertain -ceq $script:bridgeJob.Request.requestId -and $script:shortFollowUp.Phase -eq 'dispatching') 'Own live send prematurely closed follow-up.'
+        foreach ($poll in 1..3) { Tick-And-AssertHealthy }
+        Assert-That ($script:shortFollowUpGeneration -eq $token -and $InputBox.Text -ceq $spokenText -and $script:bridgeRequests.Count -eq $round) 'Waiting for a send cleared text, revoked its token or sent twice.'
+        Complete-FakeSend; Tick-And-AssertHealthy
+        Assert-That (-not $InputBox.Text -and -not $script:pendingUncertain -and $script:pendingSends.Count -eq 0 -and $script:shortFollowUp.Phase -eq 'waiting-answer') 'Accepted follow-up left a ghost draft or failed to wait for its answer.'
+        $script:tail.UserTurnVersion++
+        $script:pendingAnswers=@([pscustomobject]@{UserTurnVersion=$script:tail.UserTurnVersion;Text='合成回答第'+$round+'轮'})
+        $script:lastTailRead=[DateTime]::MinValue
+        Tick-And-AssertHealthy
+        Assert-That ($script:speechInputs[-1] -ceq ('合成回答第'+$round+'轮') -and [CodexReader.AudioPlayer]::State -eq 'playing') 'The accepted follow-up answer was not read aloud.'
+        $script:spoken++; $script:lastSpeechEpoch=$script:epoch
+        Update-ShortFollowUp ([DateTime]::UtcNow)
+        [CodexReader.AudioPlayer]::Finish(); Update-ShortFollowUp ([DateTime]::UtcNow)
+        $script:armDue=[DateTime]::UtcNow.AddMilliseconds(-1); Tick-And-AssertHealthy
+        Assert-That ($script:recMode -eq 'listening' -and $script:followUpCapture -and $script:shortFollowUp.Phase -eq 'listening') 'The next follow-up capture did not open after natural speech completion.'
+    }
+    Assert-That ($script:sent -eq 2 -and $script:bridgeRequests.Count -eq 2) 'Two follow-ups did not produce exactly two accepted sends.'
+
+    # The narrow exemption never covers a different/unknown/stale request.
+    foreach ($mismatch in @('request','target','binding','voice','token','text','worker','deadline','cancel')) {
+        Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+        $script:exercisePendingLedger=$true; $script:holdBridge=$true; $script:TestMode=$false
+        $script:nextTranscript='合成待回执内容'
+        $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-5); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow.AddSeconds(-2.2)
+        Tick-And-AssertHealthy; $script:recorder.Release(); Tick-And-AssertHealthy
+        switch ($mismatch) {
+            'request' { $script:pendingSends[$script:threadId].requestId='different-request'; Sync-PendingSend }
+            'target' { $script:bridgeJob.Request.threadId='22222222-2222-4222-8222-222222222222' }
+            'binding' { $script:bindingGeneration++ }
+            'voice' { $script:voiceGeneration++ }
+            'token' { $script:bridgeJob.FollowUpGeneration-- }
+            'text' { $InputBox.Text='用户的新草稿' }
+            'worker' { $script:bridgeJob.Process.HasExited=$true }
+            'deadline' { $script:shortFollowUp.Deadline=[DateTime]::UtcNow.AddSeconds(-1) }
+            'cancel' { Stop-ShortFollowUpByUser }
+        }
+        Update-ShortFollowUp ([DateTime]::UtcNow)
+        Assert-That (-not $script:shortFollowUp -and $InputBox.Text -and $script:pendingUncertain -and $script:bridgeRequests.Count -eq 1) ('Uncertain or invalidated send bypassed protection: '+$mismatch)
+        if ($mismatch -in @('text','cancel')) {
+            $draft=$InputBox.Text
+            Complete-FakeSend; Tick-And-AssertHealthy
+            Assert-That ($InputBox.Text -ceq $draft -and -not $script:shortFollowUp -and -not $script:pendingUncertain) ('Late receipt erased protected text or reopened capture: '+$mismatch)
+        }
+    }
+
+    foreach ($outcome in @('rejected','unknown')) {
+        Reset-Case; Start-WakeCase; Open-ShortFollowUpCapture
+        $script:exercisePendingLedger=$true; $script:holdBridge=$true; $script:TestMode=$false
+        $script:nextTranscript='合成未确认内容'
+        $script:recorder.StartedUtc=[DateTime]::UtcNow.AddSeconds(-5); $script:recorder.LastVoiceUtc=[DateTime]::UtcNow.AddSeconds(-2.2)
+        Tick-And-AssertHealthy; $script:recorder.Release(); Tick-And-AssertHealthy
+        if ($outcome -eq 'rejected') { Complete-FakeSend $false }
+        else { $script:bridgeJob.Process.HasExited=$true }
+        Tick-And-AssertHealthy; Tick-And-AssertHealthy
+        Assert-That ($InputBox.Text -ceq '合成未确认内容' -and -not $script:shortFollowUp -and $script:bridgeRequests.Count -eq 1) ('Failed send lost text or retried: '+$outcome)
+        Assert-That ([bool]$script:pendingUncertain -eq ($outcome -eq 'unknown')) ('Receipt classification lost its pending lock: '+$outcome)
+    }
 
     # Closing after capture but before its completion invalidates the separate
     # follow-up token even if the ordinary recording generation has not changed.
