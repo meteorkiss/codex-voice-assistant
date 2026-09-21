@@ -65,7 +65,10 @@ function Close-ShortFollowUp([string]$Message='', [switch]$CancelCapture) { $scr
 function Cancel-Recording { throw 'Task selection must not cancel an active recording.' }
 function Reconcile-PendingSends {}
 function Sync-PendingSend {}
-function New-TranscriptTail($Path) { return [pscustomobject]@{Path=$Path;Latest='synthetic answer';UserTurnVersion=1;Offset=19} }
+function New-TranscriptTail($Path) {
+    if ($script:failHistoryRead) { throw 'Synthetic history read failure.' }
+    return [pscustomobject]@{Path=$Path;Latest='synthetic answer';UserTurnVersion=1;Offset=19}
+}
 function Save-AssistantRecoveryDraft {
     param([string]$ThreadId,[string]$Title,[string]$Text,[string]$Reason)
     Assert-That ($InputBox.Text -ceq $Text) 'Draft was cleared before its recovery copy.'
@@ -76,6 +79,8 @@ function Save-AssistantRecoveryDraft {
     return $path
 }
 function Reset-Case {
+    Initialize-TaskBindingState
+    $script:failHistoryRead=$false
     $script:manualTaskBinding=$null; $script:voiceTaskSwitch=$null; $script:voiceTaskCreate=$null
     $script:bridgeJob=$null; $script:syncingUi=$true
     try {
@@ -115,6 +120,67 @@ function Assert-SourceRestored {
     Assert-That ($TaskCombo.SelectedItem.threadId -ceq $sourceId -and -not $script:manualTaskBinding) 'Rejected selection stayed visible or queued.'
 }
 try {
+    Run-Case 'Startup restores exactly the remembered task and reports connection stages' {
+        $script:connected=$false
+        Begin-SavedTaskBinding
+        Assert-That ($script:manualTaskBinding.Startup -and $script:requests.Count -eq 1 -and $script:requests[0].request.threadId -ceq $sourceId) 'Startup did not read exactly the remembered task.'
+        Assert-That ($script:taskBindingStage -eq 'read-target' -and $TaskLabel.Text.Contains($sourceId)) 'Startup hid the remembered identity or implied successful binding.'
+        Assert-That (Deliver-Binding (Read-Result $sourceId)) 'Startup validation did not connect.'
+        Assert-That ($script:connected -and -not $script:startupTaskRestore -and $script:taskBindingStage -eq 'connected') 'Startup did not finish its restoration lifecycle.'
+    }
+    Run-Case 'Codex not ready retries only the saved readonly target at most three times' {
+        $script:connected=$false; Begin-SavedTaskBinding
+        foreach ($attempt in 1..3) {
+            Assert-That (-not (Deliver-Binding ([pscustomobject]@{ok=$false;error=@{code='codex_not_ready';message='合成连接尚未就绪'}}))) 'A failure was treated as connected.'
+            Assert-That ($script:threadId -ceq $sourceId -and -not $script:connected -and $script:savedIds.Count -eq 0) 'Startup failure changed the persisted destination.'
+            if ($attempt -lt 3) {
+                Update-ManualTaskBinding
+                Assert-That ($script:requests.Count -eq $attempt -and $script:taskBindingStage -eq 'retry-wait') 'Retry ignored its delay.'
+                $script:startupTaskRestore.NextAttempt=[DateTime]::UtcNow.AddSeconds(-1)
+                Update-ManualTaskBinding
+            }
+        }
+        Update-ManualTaskBinding
+        Assert-That ($script:requests.Count -eq 3 -and -not $script:startupTaskRestore -and $script:taskBindingStage -eq 'failed') 'Startup retried without a bound.'
+        Assert-That ($script:taskSelectionMessage.Contains('合成连接尚未就绪') -and $script:taskBindingErrorCode -eq 'codex_not_ready') 'Failure lost its specific explanation.'
+    }
+    Run-Case 'Delayed readiness recovers without manual selection' {
+        $script:connected=$false; Begin-SavedTaskBinding
+        [void](Deliver-Binding ([pscustomobject]@{ok=$false;error=@{code='connection_unavailable';message='合成连接未启动'}}))
+        $script:startupTaskRestore.NextAttempt=[DateTime]::UtcNow.AddSeconds(-1); Update-ManualTaskBinding
+        Assert-That (Deliver-Binding (Read-Result $sourceId)) 'Delayed startup did not recover.'
+        Assert-That ($script:requests.Count -eq 2 -and -not $script:taskBindingError -and -not $script:startupTaskRestore) 'Recovered startup retained failure or scheduled another retry.'
+    }
+    Run-Case 'User choice and new text cancel automatic startup retries' {
+        foreach ($action in @('select','input')) {
+            $script:connected=$false; $script:threadId=$sourceId; Begin-SavedTaskBinding
+            [void](Deliver-Binding ([pscustomobject]@{ok=$false;error=@{code='codex_not_running';message='合成未启动'}}))
+            if ($action -eq 'select') {
+                $TaskCombo.SelectedItem=$taskB
+                Assert-That ($script:manualTaskBinding.TargetThreadId -ceq $targetId -and -not $script:startupTaskRestore) 'Explicit choice did not supersede startup.'
+                Assert-That (Deliver-Binding (Read-Result)) 'Explicit selection failed after startup cancellation.'
+            } else {
+                $InputBox.Text='启动重试期间的新文字'
+                $count=$script:requests.Count; Update-ManualTaskBinding
+                Assert-That (-not $script:startupTaskRestore -and $script:requests.Count -eq $count -and $InputBox.Text -and $script:taskBindingStage -eq 'cancelled' -and -not $script:taskSelectionMessage.Contains('将自动重试')) 'New input failed to cancel startup retry or retained a misleading retry hint.'
+            }
+        }
+    }
+    Run-Case 'Permanent errors and archived startup targets never auto-retry' {
+        foreach ($kind in @('connection_ambiguous','untrusted_connection','task_archived','wrong_target')) {
+            $script:connected=$false; Begin-SavedTaskBinding
+            [void](Deliver-Binding ([pscustomobject]@{ok=$false;error=@{code=$kind;message='合成永久错误'}}))
+            $count=$script:requests.Count; Update-ManualTaskBinding
+            Assert-That (-not $script:startupTaskRestore -and $script:requests.Count -eq $count) ('Unsafe automatic retry: '+$kind)
+        }
+    }
+    Run-Case 'History failure is distinguished from settings failure and restores old target' {
+        $TaskCombo.SelectedItem=$taskB; $script:failHistoryRead=$true
+        Assert-That (-not (Deliver-Binding (Read-Result))) 'History failure was reported as connected.'
+        Assert-SourceRestored
+        Assert-That ($script:taskBindingErrorCode -eq 'read-history' -and $script:taskBindingError.Contains('Synthetic history read failure.')) 'History error was masked as settings failure.'
+        Assert-That ($script:savedIds.Count -le 1 -and $script:savedIds -notcontains $targetId) 'Failed history read persisted the new target.'
+    }
     Run-Case 'User selection validates once then commits the selected task' {
         $TaskCombo.SelectedItem=$taskB
         Assert-That ($script:requests.Count -eq 1 -and $script:requests[0].request.threadId -ceq $targetId -and $script:requests[0].purpose -eq 'bind') 'Selection did not read exactly its selected task.'
@@ -225,6 +291,7 @@ try {
         $InputBox.Text='保存连接失败也保留草稿'; $TaskCombo.SelectedItem=$taskB
         $copy=$script:lastRecoveryDraftPath; $script:failSettingsSave=$true
         Assert-That (-not (Deliver-Binding (Read-Result))) 'Settings failure was reported as successful binding.'
+        Assert-That ($script:taskBindingErrorCode -eq 'save-settings' -and $script:taskBindingError.Contains('Synthetic settings persistence failure.')) 'Settings error lost its failure stage.'
         Assert-SourceRestored
         Assert-That ([IO.File]::Exists($copy) -and [IO.File]::ReadAllText($copy).EndsWith('保存连接失败也保留草稿') -and -not $InputBox.Text) 'Settings rollback lost or forwarded the recovery copy.'
     }

@@ -20,6 +20,99 @@ import codex_bridge as bridge
 TEST_THREAD = str(uuid.uuid4())
 
 
+class DiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.paths = [bridge.PIPE_PREFIX + 'codex-browser-use-' + str(uuid.uuid4()) for _ in range(3)]
+        self.capabilities = {'tools': [{'namespace': 'codex_app', 'name': name}
+                                       for name in ('read_thread', 'send_message_to_thread')]}
+        env = patch.dict(os.environ, {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_standalone_discovers_app_tools_not_browser_endpoints(self):
+        def response(path, method, params, **kwargs):
+            self.assertEqual(method, 'tools/list')
+            self.assertFalse(kwargs.get('mutation', False))
+            return self.capabilities if path == self.paths[1] else {'tools': [{'namespace': 'browser', 'name': 'read_thread'}]}
+        with patch.object(bridge.os, 'listdir', return_value=[p[len(bridge.PIPE_PREFIX):] for p in self.paths] + ['unrelated']), \
+                patch.object(bridge, 'pipe_request', side_effect=response) as calls:
+            self.assertEqual(bridge.discover_pipe(), self.paths[1])
+            self.assertEqual(calls.call_count, 3)
+
+    def test_ambiguous_app_endpoints_never_choose_first(self):
+        with patch.object(bridge.os, 'listdir', return_value=[p[len(bridge.PIPE_PREFIX):] for p in self.paths]), \
+                patch.object(bridge, 'pipe_request', return_value=self.capabilities):
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.discover_pipe()
+            self.assertEqual(error.exception.code, 'connection_ambiguous')
+
+    def test_fresh_hint_and_explicit_endpoint_do_not_enumerate(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), patch.dict(os.environ, {'CODEX_APP_TOOLS_PIPE_PATH': self.paths[0]}), \
+                    patch.object(bridge.os, 'listdir') as listing, \
+                    patch.object(bridge, 'pipe_request', return_value=self.capabilities):
+                self.assertEqual(bridge.discover_pipe(self.paths[1] if explicit else None), self.paths[1] if explicit else self.paths[0])
+                listing.assert_not_called()
+
+    def test_stale_inherited_hint_falls_back_only_before_dispatch(self):
+        def response(path, *args, **kwargs):
+            if path == self.paths[0]:
+                raise bridge.BridgeError('connection_unavailable', 'expired hint')
+            return self.capabilities
+        with patch.dict(os.environ, {'CODEX_APP_TOOLS_PIPE_PATH': self.paths[0]}), \
+                patch.object(bridge.os, 'listdir', return_value=[self.paths[1][len(bridge.PIPE_PREFIX):]]), \
+                patch.object(bridge, 'pipe_request', side_effect=response):
+            self.assertEqual(bridge.discover_pipe(), self.paths[1])
+
+    def test_explicit_dead_or_untrusted_hint_never_falls_back(self):
+        for explicit, code in ((True, 'connection_unavailable'), (False, 'untrusted_connection')):
+            with self.subTest(code=code), patch.dict(os.environ, {'CODEX_APP_TOOLS_PIPE_PATH': self.paths[0]}), \
+                    patch.object(bridge.os, 'listdir') as listing, \
+                    patch.object(bridge, 'pipe_request', side_effect=bridge.BridgeError(code, 'blocked')):
+                with self.assertRaises(bridge.BridgeError):
+                    bridge.discover_pipe(self.paths[0] if explicit else None)
+                listing.assert_not_called()
+
+    def test_no_endpoint_and_excess_candidates_are_bounded(self):
+        for count, code in ((0, 'codex_not_running'), (17, 'connection_ambiguous')):
+            with self.subTest(count=count), patch.object(bridge.os, 'listdir', return_value=['codex-browser-use-'+str(uuid.uuid4()) for _ in range(count)]), \
+                    patch.object(bridge, 'pipe_request') as call:
+                with self.assertRaises(bridge.BridgeError) as error:
+                    bridge.discover_pipe()
+                self.assertEqual(error.exception.code, code)
+                call.assert_not_called()
+
+    def test_unknown_second_endpoint_blocks_unique_assumption(self):
+        def response(path, *args, **kwargs):
+            if path == self.paths[0]:
+                raise bridge.BridgeError('connection_timeout', 'unresolved endpoint')
+            return self.capabilities
+        with patch.object(bridge.os, 'listdir', return_value=[p[len(bridge.PIPE_PREFIX):] for p in self.paths[:2]]), \
+                patch.object(bridge, 'pipe_request', side_effect=response):
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.discover_pipe()
+            self.assertEqual(error.exception.code, 'connection_timeout')
+
+    def test_malformed_capabilities_are_rejected(self):
+        for value in (None, [], {}, {'tools': None}, {'tools': [None, 'x', {}]}):
+            with self.subTest(value=value), patch.object(bridge, 'pipe_request', return_value=value):
+                with self.assertRaises(bridge.BridgeError) as error:
+                    bridge.probe_app_pipe(self.paths[0])
+                self.assertEqual(error.exception.code, 'unsupported_app_version')
+
+    def test_untrusted_owner_is_rejected_before_any_write(self):
+        from unittest.mock import mock_open
+        opened = mock_open()
+        with patch('builtins.open', opened), \
+                patch.object(bridge, 'verify_pipe_owner', side_effect=bridge.BridgeError('untrusted_connection', 'wrong owner')) as owner:
+            with self.assertRaises(bridge.BridgeError) as error:
+                bridge.pipe_request(self.paths[0], 'tools/call', {}, mutation=True)
+            self.assertEqual(error.exception.code, 'untrusted_connection')
+            self.assertFalse(error.exception.uncertain)
+            owner.assert_called_once()
+            opened().write.assert_not_called()
+
+
 class SendTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=RUN_ROOT)

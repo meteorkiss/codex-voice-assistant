@@ -259,7 +259,9 @@ function Apply-Thread($Result) {
     if (-not $Result.rolloutPath -or -not (Test-Path -LiteralPath $Result.rolloutPath)) { throw '这个任务的本地记录暂时不可用，请先在 Codex 打开它。' }
     $path=if ($TestTranscriptPath) { $TestTranscriptPath } else { $Result.rolloutPath }
     $reuseTail=($script:connected -and $script:threadId -eq $Result.threadId -and $script:tail -and $script:tail.Path -eq $path)
+    $script:taskBindingStage='read-history'
     $nextTail=if ($reuseTail) { $script:tail } else { New-TranscriptTail $path }
+    $script:taskBindingStage='apply-target'
     if ($script:threadId -ne $Result.threadId) {
         if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标任务已改变，连续接话已结束。' -CancelCapture }
         Suspend-WakeListener
@@ -289,6 +291,7 @@ function Apply-Thread($Result) {
     Reconcile-PendingSends
     Sync-PendingSend
     if ($script:pendingUncertain) { $script:notice='这个任务有一条发送状态待确认，请先在 Codex 查看。' }
+    $script:taskBindingStage='save-settings'
     Save-Settings
 }
 
@@ -606,6 +609,10 @@ try {
             $statusData.recoveryDraftError=[string]$script:recoveryDraftError
             $statusData.selectedTaskId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' }
             $statusData.selectionNeedsConnection=[bool]($TaskCombo.SelectedItem -and (-not $script:connected -or $TaskCombo.SelectedItem.threadId -cne $script:threadId))
+            $statusData.taskBindingStage=$script:taskBindingStage
+            $statusData.taskBindingErrorCode=$script:taskBindingErrorCode
+            $statusData.taskBindingError=$script:taskBindingError
+            $statusData.startupRestoreAttempt=if ($script:startupTaskRestore) { $script:startupTaskRestore.Attempts } else { 0 }
             $statusData.settingsTopmost=[bool]$desktop.SettingsWindow.Topmost
             $statusData.bindingReadError=$script:bindingReadError
             $statusData.lastLocalCommand=$script:lastLocalCommand
@@ -678,7 +685,7 @@ try {
     } else {
         $script:mic.Start()
         $tray.Visible=$true
-        if ($script:threadId) { [void](Begin-ManualTaskBinding $script:threadId -Startup) } else { Show-AssistantSettings }
+        if ($script:threadId) { Begin-SavedTaskBinding } else { Show-AssistantSettings }
         $timer.Start(); if ($script:floatingVisible) { $window.Show() }; [Windows.Threading.Dispatcher]::Run()
     }
 } catch {

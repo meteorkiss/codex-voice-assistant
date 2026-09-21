@@ -39,6 +39,7 @@ function Try-LocalAssistantCommand([string]$Text) {
         return $true
     }
     if ($command.Action -in @('createTask','resumeCreatedTask','cancelCreatedTaskConnection','switchTask','chooseTask','cancelTaskSwitch')) {
+        Cancel-SavedTaskBinding
         $pendingCheckFailed=$false
         $noCreatedTaskPending=$false
         # Bare candidate choices are ordinary input outside an active selection.

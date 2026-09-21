@@ -27,6 +27,67 @@ function Test-TaskBindingSelectionHealthy {
     return [bool]($script:connected -and -not $script:bindingReadError -and $script:bindingAvailability -notin @('archived','missing','unknown'))
 }
 
+function Initialize-TaskBindingState {
+    $script:startupTaskRestore=$null
+    $script:taskBindingStage='idle'
+    $script:taskBindingErrorCode=''
+    $script:taskBindingError=''
+}
+
+function Begin-SavedTaskBinding {
+    if (-not $script:threadId) { return }
+    $script:startupTaskRestore=@{TargetThreadId=[string]$script:threadId;VoiceGeneration=$script:voiceGeneration;
+        Attempts=0;NextAttempt=[DateTime]::UtcNow;Deadline=[DateTime]::UtcNow.AddSeconds(60)}
+    $TaskLabel.Text='上次任务（待连接）：'+$script:threadId
+    $TaskLabel.ToolTip=$script:threadId
+    Update-SavedTaskBinding
+}
+
+function Cancel-SavedTaskBinding {
+    if ($script:startupTaskRestore -and $script:taskBindingStage -eq 'retry-wait') {
+        $script:taskBindingStage='cancelled'
+        $script:taskSelectionMessage='自动恢复已停止；未更改目标，请在设置中明确选择任务。'
+        $script:notice=$script:taskSelectionMessage
+    }
+    $script:startupTaskRestore=$null
+}
+
+function Update-SavedTaskBinding {
+    $restore=$script:startupTaskRestore
+    if (-not $restore) { return }
+    if ($script:connected -or $restore.TargetThreadId -cne $script:threadId -or
+        $restore.VoiceGeneration -ne $script:voiceGeneration -or (Get-TaskBindingBlockReason) -or
+        $restore.Deadline -le [DateTime]::UtcNow) {
+        Cancel-SavedTaskBinding
+        return
+    }
+    if ($script:manualTaskBinding -or $script:bridgeJob -or $restore.NextAttempt -gt [DateTime]::UtcNow) { return }
+    $restore.Attempts++
+    if (-not (Begin-ManualTaskBinding $restore.TargetThreadId -Startup)) { $script:startupTaskRestore=$null }
+}
+
+function Set-TaskBindingFailure {
+    param([string]$Code,[string]$Message,$Pending)
+    $script:taskBindingErrorCode=$Code
+    $script:taskBindingError=$Message
+    $script:taskBindingStage='failed'
+    $prefix=if ($Pending.Startup) { '恢复上次任务失败：' } else { '连接所选任务失败：' }
+    $script:notice=$prefix+$Message+' 未更改已保存的目标。'
+    $restore=$script:startupTaskRestore
+    if ($Pending.Startup -and $restore -and $restore.Attempts -lt 3 -and
+        $restore.Deadline -gt [DateTime]::UtcNow -and
+        $Code -in @('codex_not_running','codex_not_ready','connection_unavailable','connection_timeout','discovery_failed')) {
+        $restore.NextAttempt=[DateTime]::UtcNow.AddSeconds(2*$restore.Attempts)
+        $script:taskBindingStage='retry-wait'
+        $script:notice+=' 将自动重试（'+($restore.Attempts+1)+'/3）。'
+    } else {
+        $script:startupTaskRestore=$null
+        $script:notice+=' 请在 Codex 就绪后重新选择任务。'
+    }
+    Sync-TaskBindingSelection
+    $script:taskSelectionMessage=$script:notice
+}
+
 function Sync-TaskBindingSelection {
     if (-not $TaskCombo) { return }
     $wasSyncing=$script:syncingUi; $script:syncingUi=$true
@@ -43,7 +104,8 @@ function Invoke-TaskBindingCommit {
     param($Result, [string]$TargetThreadId, [scriptblock]$AfterApply=$null)
     $blocked=Get-TaskBindingBlockReason
     if ($blocked) { throw $blocked }
-    if (-not (Test-TaskBindingResult $Result $TargetThreadId)) { throw '目标任务回执不完整，保留原任务。' }
+    $script:taskBindingStage='validate'
+    if (-not (Test-TaskBindingResult $Result $TargetThreadId)) { throw '目标任务回执不完整或本地记录不可用。' }
     $before=@{}
     foreach ($key in @('threadId','boundDirectory','tail','latest','busy','connected','lastUserVersion','bindingReadError','bindingAvailability','bindingAvailabilityError','bindingGeneration','lastBindingProbe')) {
         $before[$key]=Get-Variable -Name $key -Scope Script -ValueOnly -ErrorAction SilentlyContinue
@@ -55,6 +117,10 @@ function Invoke-TaskBindingCommit {
         Apply-Thread $Result
         if ($AfterApply) { & $AfterApply }
         Sync-TaskBindingSelection
+        $script:startupTaskRestore=$null
+        $script:taskBindingStage='connected'
+        $script:taskBindingErrorCode=''
+        $script:taskBindingError=''
         $script:taskSelectionMessage=''
     } catch {
         # Persisting either settings or the caller's connection receipt can fail.
@@ -79,6 +145,8 @@ function Reset-ManualTaskBinding {
     $pending=$script:manualTaskBinding
     $script:manualTaskBinding=$null
     if (-not $pending) { return }
+    if ($pending.Startup) { $script:startupTaskRestore=$null }
+    $script:taskBindingStage='cancelled'
     if ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'bind' -and
         $script:bridgeJob.TaskBindingContext.Token -ceq $pending.Token) {
         $job=$script:bridgeJob; $script:bridgeJob=$null
@@ -93,6 +161,7 @@ function Reset-ManualTaskBinding {
 
 function Begin-ManualTaskBinding {
     param([string]$TargetThreadId, [switch]$Startup, [switch]$AutoConnect)
+    if (-not $Startup) { Cancel-SavedTaskBinding }
     Reset-ManualTaskBinding -KeepSelection
     $blocked=Get-TaskBindingBlockReason -IgnoreDraft
     if ($blocked) { $script:notice=$blocked; return $false }
@@ -126,11 +195,15 @@ function Begin-ManualTaskBinding {
     try {
         if (-not (Start-Bridge @{action='read';threadId=$TargetThreadId} 'bind')) { throw '连接未开始。' }
         $script:bridgeJob.TaskBindingContext=$context.Clone()
+        $script:taskBindingStage='read-target'
+        $script:taskBindingErrorCode=''
+        $script:taskBindingError=''
+        $script:taskSelectionMessage=''
         $script:notice='正在确认目标任务，确认成功后才切换连接…'
         return $true
     } catch {
         Reset-ManualTaskBinding
-        $script:notice='目标任务暂时无法读取，保留原任务。'
+        Set-TaskBindingFailure 'launch-failed' ('无法启动连接检查：'+$_.Exception.Message) $context
         return $false
     }
 }
@@ -149,6 +222,7 @@ function Get-ManualTaskBindingStaleReason($Pending) {
 }
 
 function Update-ManualTaskBinding {
+    Update-SavedTaskBinding
     if (-not $script:manualTaskBinding) { return }
     $reason=Get-ManualTaskBindingStaleReason $script:manualTaskBinding
     if ($reason) { Reset-ManualTaskBinding $reason }
@@ -164,18 +238,36 @@ function Complete-ManualTaskBinding {
     if ($reason) { Reset-ManualTaskBinding $reason; return $false }
     # Consume the context before applying: a duplicate callback cannot commit.
     $script:manualTaskBinding=$null
+    if (-not $Result -or $Result.ok -isnot [bool] -or -not $Result.ok) {
+        $code=if ($Result.error.code) { [string]$Result.error.code } else { 'invalid-response' }
+        $message=if ($Result.error.message) { [string]$Result.error.message } else { '连接检查没有返回有效结果。' }
+        Set-TaskBindingFailure $code $message $pending
+        return $false
+    }
     if ($Result -and $Result.ok -is [bool] -and $Result.ok -and $Result.threadId -ceq $pending.TargetThreadId -and $Result.archived -is [bool] -and $Result.archived) {
+        $script:startupTaskRestore=$null
+        $script:taskBindingStage='failed'
+        $script:taskBindingErrorCode='task_archived'
+        $script:taskBindingError='目标任务已归档。'
         if ($pending.Startup -and $pending.TargetThreadId -ceq $script:threadId) {
             if ($Result.title) { $TaskLabel.Text=[string]$Result.title; $TaskLabel.ToolTip=[string]$Result.title }
             [void](Enter-TaskBindingRecovery 'archived')
         } else { $script:notice='所选任务已归档，未连接；请选择活动任务。' }
-        if ($pending.AutoConnect) { Sync-TaskBindingSelection; $script:taskSelectionMessage=$script:notice }
+        Sync-TaskBindingSelection
+        $script:taskSelectionMessage=$script:notice
         return $false
     }
     try { Invoke-TaskBindingCommit $Result $pending.TargetThreadId }
     catch {
-        $script:notice='连接没有完成或保存失败，已保留原任务，请重新选择。'
-        if ($pending.AutoConnect) { Sync-TaskBindingSelection; $script:taskSelectionMessage=$script:notice }
+        $stage=$script:taskBindingStage
+        $stageName=switch ($stage) {
+            'validate' { '校验目标失败' }
+            'read-history' { '读取本地记录失败' }
+            'apply-target' { '更新连接失败' }
+            'save-settings' { '保存连接设置失败' }
+            default { '完成连接失败' }
+        }
+        Set-TaskBindingFailure $stage ($stageName+'：'+$_.Exception.Message) $pending
         return $false
     }
     $script:taskSelectionMessage=''
@@ -187,6 +279,7 @@ function Update-TaskBindingInput {
     # Clearing precisely the command just consumed by the router is not new
     # user input. Every other edit invalidates even if the text is later erased.
     if ($script:consumingLocalCommand) { return }
+    Cancel-SavedTaskBinding
     Reset-ManualTaskBinding '文字已改变，已取消这次连接并保留草稿。'
     if ($script:voiceTaskSwitch -and $script:voiceTaskSwitch.Phase -ne 'choosing') { Reset-VoiceTaskSwitch }
     Invalidate-VoiceTaskCreateBinding -Reason '输入文字已改变，保留新建结果但不自动连接。'

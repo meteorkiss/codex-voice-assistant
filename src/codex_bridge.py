@@ -7,6 +7,7 @@ Send requires a stable requestId. Never automatically retry an uncertain send.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -16,7 +17,6 @@ import queue
 import re
 import sqlite3
 import struct
-import subprocess
 import sys
 import threading
 import time
@@ -49,6 +49,53 @@ def valid_thread(value):
         raise BridgeError('invalid_thread', '请选择一个有效的本地 Codex 任务。')
 
 
+def verify_pipe_owner(stream):
+    """Authenticate the open handle, before sending any data (also after discovery).
+
+    Modern desktop builds no longer expose the endpoint in app-server argv.
+    A matching pipe name alone is not identity. Require the OS-attested Codex
+    package, its foreground executable and our interactive Windows session.
+    Do not inspect another process's environment or persist a rotating endpoint.
+    """
+    import ctypes
+    from ctypes import wintypes as w
+    import msvcrt
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetNamedPipeServerProcessId.argtypes = [w.HANDLE, ctypes.POINTER(w.ULONG)]
+    kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+    kernel.OpenProcess.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.GetPackageFamilyName.argtypes = [w.HANDLE, ctypes.POINTER(w.UINT), w.LPWSTR]
+    kernel.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD)]
+    kernel.ProcessIdToSessionId.argtypes = [w.DWORD, ctypes.POINTER(w.DWORD)]
+    pid = w.ULONG()
+    process = None
+    try:
+        if not kernel.GetNamedPipeServerProcessId(msvcrt.get_osfhandle(stream.fileno()), ctypes.byref(pid)):
+            raise OSError('pipe owner unavailable')
+        process = kernel.OpenProcess(0x1000, False, pid.value)
+        if not process:
+            raise OSError('owner process unavailable')
+        family = ctypes.create_unicode_buffer(256)
+        size = w.UINT(len(family))
+        image = ctypes.create_unicode_buffer(32768)
+        image_size = w.DWORD(len(image))
+        own_session, server_session = w.DWORD(), w.DWORD()
+        if (kernel.GetPackageFamilyName(process, ctypes.byref(size), family) != 0
+                or family.value != 'OpenAI.Codex_2p2nqsd0c76g0'
+                or not kernel.QueryFullProcessImageNameW(process, 0, image, ctypes.byref(image_size))
+                or Path(image.value).name.lower() not in ('chatgpt.exe', 'codex.exe')
+                or not kernel.ProcessIdToSessionId(os.getpid(), ctypes.byref(own_session))
+                or not kernel.ProcessIdToSessionId(pid.value, ctypes.byref(server_session))
+                or own_session.value != server_session.value):
+            raise OSError('unexpected package, executable or session')
+    except OSError as exc:
+        raise BridgeError('untrusted_connection', '无法确认连接属于当前 Windows 会话中的 Codex 桌面应用。') from exc
+    finally:
+        if process:
+            kernel.CloseHandle(process)
+
+
 def pipe_request(path, method, params, timeout=12, mutation=False):
     """Match bundled NativePipeClient: LE uint32 byte length + UTF-8 JSON-RPC.
 
@@ -63,6 +110,7 @@ def pipe_request(path, method, params, timeout=12, mutation=False):
     def exchange():
         try:
             with open(path, 'r+b', buffering=0) as stream:
+                verify_pipe_owner(stream)
                 body = json.dumps({'id': 1, 'jsonrpc': '2.0', 'method': method,
                                    'params': params}, ensure_ascii=False).encode('utf-8')
                 if len(body) > MAX_FRAME:
@@ -114,36 +162,56 @@ def pipe_request(path, method, params, timeout=12, mutation=False):
     return response
 
 
-def discover_pipe(explicit=None):
-    """Use the app-provided pipe, or discover its path from app-server arguments.
-
-    Only the pipe name is returned by the fixed read-only PowerShell command.
-    Enumerating every similarly named pipe is unsafe: many belong to other tools.
-    """
-    candidates = []
-    for value in [explicit, os.environ.get('CODEX_APP_TOOLS_PIPE_PATH')]:
-        if value and value not in candidates:
-            candidates.append(value)
-    if not candidates:
-        script = ("Get-CimInstance Win32_Process -Filter \"Name = 'codex.exe'\" | "
-                  "Where-Object { $_.CommandLine -match 'mcp_servers.codex_app' } | "
-                  "ForEach-Object { [regex]::Matches($_.CommandLine, 'codex-browser-use-[0-9a-fA-F-]{36}') | "
-                  "ForEach-Object { $_.Value } } | Sort-Object -Unique")
-        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
-                                capture_output=True, text=True, encoding='utf-8', errors='replace',
-                                timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        if result.returncode != 0:
-            raise BridgeError('discovery_failed', '无法找到 Codex 连接，请确认 Codex 正在运行。')
-        candidates = [PIPE_PREFIX + n for n in result.stdout.splitlines() if PIPE_NAME.fullmatch(n.strip())]
-    if len(candidates) != 1:
-        raise BridgeError('connection_ambiguous' if candidates else 'codex_not_running',
-                          '无法确定唯一的 Codex 桌面连接。请保持一个 Codex 桌面实例运行。')
-    path = candidates[0]
-    result = pipe_request(path, 'tools/list', {'threadStartKind': 'all'}, timeout=6)
-    names = {(t.get('namespace'), t.get('name')) for t in result.get('tools', [])}
+def probe_app_pipe(path):
+    result = pipe_request(path, 'tools/list', {'threadStartKind': 'all'}, timeout=2)
+    entries = result.get('tools', []) if isinstance(result, dict) else []
+    names = {(t.get('namespace'), t.get('name')) for t in entries if isinstance(t, dict)} if isinstance(entries, list) else set()
     if not {('codex_app', x) for x in ['read_thread', 'send_message_to_thread']} <= names:
         raise BridgeError('unsupported_app_version', '当前 Codex 连接不提供所需的任务工具。')
     return path
+
+
+def discover_pipe(explicit=None):
+    """Choose exactly one authenticated App Tools endpoint, never a browser pipe.
+
+    Discovery sends tools/list only. No operation, especially a write, is ever
+    replayed on a different endpoint. Discovery is bounded even with dead pipes.
+    An explicit endpoint is authoritative; only stale inherited hints fall back.
+    """
+    if explicit:
+        return probe_app_pipe(explicit)
+    inherited = os.environ.get('CODEX_APP_TOOLS_PIPE_PATH')
+    if inherited:
+        try:
+            return probe_app_pipe(inherited)
+        except BridgeError as exc:
+            if exc.code not in ('connection_unavailable', 'connection_timeout'):
+                raise
+    try:
+        candidates = sorted({PIPE_PREFIX + n for n in os.listdir(PIPE_PREFIX) if PIPE_NAME.fullmatch(n)})
+    except OSError as exc:
+        raise BridgeError('discovery_failed', '无法枚举本机 Codex 连接，请确认 Codex 正在运行。') from exc
+    if not candidates:
+        raise BridgeError('codex_not_running', '尚未找到 Codex 桌面连接，请先启动 Codex。')
+    if len(candidates) > 16:
+        raise BridgeError('connection_ambiguous', '候选连接过多，无法安全确定 Codex 桌面连接。')
+    found, errors = [], []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        futures = [pool.submit(probe_app_pipe, path) for path in candidates]
+        for future in futures:
+            try:
+                found.append(future.result())
+            except BridgeError as exc:
+                errors.append(exc)
+    if len(found) > 1:
+        raise BridgeError('connection_ambiguous', '找到多个 Codex 任务连接，请关闭多余桌面实例后重试。')
+    # A timed-out endpoint may be a second App Tools server: fail closed.
+    uncertain = [e for e in errors if e.code not in ('unsupported_app_version', 'untrusted_connection', 'connection_unavailable', 'app_rejected')]
+    if uncertain:
+        raise uncertain[0]
+    if not found:
+        raise BridgeError('codex_not_ready', 'Codex 已启动，但任务连接尚未就绪，请稍后重试。')
+    return found[0]
 
 
 def app_tool(pipe, tool, arguments, source_thread, request_id=None, mutation=False):

@@ -96,6 +96,7 @@ function Exit-Assistant {
     $window.Close()
 }
 function Refresh-AssistantTasks {
+    Cancel-SavedTaskBinding
     Reset-ManualTaskBinding '已刷新任务列表，取消上次连接。'
     Invalidate-VoiceTaskCreateBinding -Reason '已手动刷新任务列表'
     Reset-VoiceTaskSwitch
@@ -104,6 +105,13 @@ function Refresh-AssistantTasks {
 function Set-TaskCandidates($Threads, [string]$Warning='') {
     $script:taskCandidates=@($Threads)
     $script:tasksLoaded=$true
+    if (-not $script:connected -and $script:threadId) {
+        $remembered=@($Threads | Where-Object {$_.threadId -ceq $script:threadId})
+        if ($remembered.Count -eq 1) {
+            $TaskLabel.Text='上次任务（未连接）：'+$remembered[0].title
+            $TaskLabel.ToolTip=$remembered[0].title
+        }
+    }
     $script:syncingUi=$true
     try {
         $DirectoryCombo.Items.Clear()
@@ -203,7 +211,7 @@ function Update-DesktopDisplay {
         $desktop.Controls.TaskSelectionHint.Text=if ($script:manualTaskBinding) { '正在连接所选任务，请等待确认；旧草稿不会发送到新任务。' } elseif ($script:taskSelectionMessage) { $script:taskSelectionMessage } elseif ($TaskCombo.SelectedItem -and $script:connected -and $TaskCombo.SelectedItem.threadId -ceq $script:threadId) { '已连接到所选任务；后续消息发往这里。' } elseif ($script:connected) { '当前连接保持不变；选择其它任务后自动连接。' } else { '选中任务后自动连接；旧草稿会单独保存。' }
     }
     if ($desktop.Controls.ContainsKey('BindingAvailabilityLabel')) {
-        $desktop.Controls.BindingAvailabilityLabel.Text=if ($script:bindingAvailability -eq 'archived') { '原任务已归档，普通发送已停用；可唤醒后说切换任务。' } elseif ($script:bindingAvailability -eq 'missing') { '原任务不存在，请重新选择；不会自动连接其它任务。' } elseif ($script:bindingAvailability -eq 'unknown') { $script:bindingAvailabilityError } elseif ($script:connected) { '连接有效' } else { '尚未建立可发送的连接' }
+        $desktop.Controls.BindingAvailabilityLabel.Text=if ($script:bindingAvailability -eq 'archived') { '原任务已归档，普通发送已停用；可唤醒后说切换任务。' } elseif ($script:bindingAvailability -eq 'missing') { '原任务不存在，请重新选择；不会自动连接其它任务。' } elseif ($script:bindingAvailability -eq 'unknown') { $script:bindingAvailabilityError } elseif ($script:connected) { '连接有效' } elseif ($script:manualTaskBinding) { '正在校验目标任务，尚不可发送' } elseif ($script:taskBindingError) { $script:taskBindingError } elseif ($script:threadId) { '已记住上次任务，尚未恢复连接' } else { '尚未建立可发送的连接' }
     }
     if ($desktop.Controls.ContainsKey('RecoveryDraftButton')) {
         $desktop.Controls.RecoveryDraftButton.IsEnabled=($script:recoveryDraftCount -gt 0)
@@ -213,6 +221,7 @@ function Update-DesktopDisplay {
     $OpenTaskButton.IsEnabled=($script:connected -and -not $script:bridgeJob)
 }
 function Initialize-DesktopController {
+    Initialize-TaskBindingState
     $script:tasksLoaded=$false
     $script:taskCandidates=@()
     $script:taskSelectionMessage=''
