@@ -17,6 +17,51 @@ function Remove-OwnedFiles($Paths) {
         } catch { $script:workerWarning='部分临时文件仍被占用，将保留供当前操作使用。' }
     }
 }
+
+# Crash cleanup is deliberately limited to no-wake artifacts. Other workers
+# may intentionally survive the UI long enough to write a durable receipt in
+# the same run directory, so the run directory itself is never removed here.
+function Test-AssistantRunDirectory([string]$StateDirectory,[string]$Candidate) {
+    if (-not $StateDirectory -or -not $Candidate) { return $false }
+    try {
+        $stateFull=[IO.Path]::GetFullPath($StateDirectory).TrimEnd('\')
+        $candidateFull=[IO.Path]::GetFullPath($Candidate).TrimEnd('\')
+        if (-not [string]::Equals([IO.Path]::GetDirectoryName($candidateFull),$stateFull,[StringComparison]::OrdinalIgnoreCase) -or
+            [IO.Path]::GetFileName($candidateFull) -notmatch '^run-[0-9a-f]{32}$' -or
+            -not [IO.Directory]::Exists($candidateFull)) { return $false }
+        if (([IO.File]::GetAttributes($candidateFull) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+        return $true
+    } catch { return $false }
+}
+
+function Remove-NoWakeFilesFromRun([string]$StateDirectory,[string]$Candidate) {
+    if (-not (Test-AssistantRunDirectory $StateDirectory $Candidate)) { return $false }
+    $removed=$true
+    try {
+        foreach ($file in [IO.Directory]::GetFiles([IO.Path]::GetFullPath($Candidate),'*.nowake.*',[IO.SearchOption]::TopDirectoryOnly)) {
+            $name=[IO.Path]::GetFileName($file)
+            if ($name -notmatch '^[0-9a-f]{32}\.nowake\.(wav|asr\.json(?:\.tmp)?)$') { continue }
+            if (([IO.File]::GetAttributes($file) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $removed=$false; continue }
+            try { [IO.File]::Delete($file) } catch { $removed=$false; $script:workerWarning='免唤醒临时文件仍被占用，将在下次启动时再次清理。' }
+        }
+        return $removed
+    } catch {
+        $script:workerWarning='免唤醒临时文件仍被占用，将在下次启动时再次清理。'
+        return $false
+    }
+}
+
+function Remove-StaleNoWakeFiles([string]$StateDirectory,[string]$CurrentRun) {
+    try {
+        if (-not $StateDirectory -or -not [IO.Directory]::Exists($StateDirectory)) { return }
+        $currentFull=if ($CurrentRun) { [IO.Path]::GetFullPath($CurrentRun).TrimEnd('\') } else { '' }
+        foreach ($candidate in [IO.Directory]::GetDirectories([IO.Path]::GetFullPath($StateDirectory),'run-*',[IO.SearchOption]::TopDirectoryOnly)) {
+            if ($currentFull -and [string]::Equals([IO.Path]::GetFullPath($candidate).TrimEnd('\'),$currentFull,[StringComparison]::OrdinalIgnoreCase)) { continue }
+            [void](Remove-NoWakeFilesFromRun $StateDirectory $candidate)
+        }
+    } catch { $script:workerWarning='旧免唤醒临时文件检查未完成，不影响本次启动。' }
+}
+
 function Close-Job($Job, [switch]$Kill) {
     if ($null -eq $Job) { return }
     try {

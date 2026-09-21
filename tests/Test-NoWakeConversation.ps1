@@ -48,6 +48,26 @@ Assert-NoWakeConversation ((Get-NoWakeBlockReason) -eq 'external-capture') 'Exte
 $script:mic.Sessions=@()
 Assert-NoWakeConversation (-not (Get-NoWakeBlockReason)) 'Safe synthetic state stayed blocked.'
 
+$script:pendingSends=@{'thread-a'=[pscustomobject]@{Text='queued'}}
+$handled=Invoke-NoWakeContextDecision '选择第二个' $decision (Get-NoWakeContextSnapshot '选择第二个')
+Assert-NoWakeConversation (-not $handled -and $script:routed -eq 1) 'A pending send did not block contextual execution.'
+$script:pendingSends=@{}
+
+$staleSegment=[pscustomobject]@{Generation=($script:noWakeGeneration-1);Pcm=[byte[]](1,2);StartedAt=[DateTime]::UtcNow;EndedAt=[DateTime]::UtcNow;Reason='silence'}
+Start-NoWakeTranscription $staleSegment
+Assert-NoWakeConversation ($null -eq $script:noWakeAsrJob) 'A stale capture segment started transcription.'
+
+$stuckCapture=[pscustomobject]@{Released=$false;StopCalls=0;Disposed=$false}
+$stuckCapture | Add-Member ScriptMethod Stop { $this.StopCalls++ }
+$stuckCapture | Add-Member ScriptMethod StopAndWait { param([int]$TimeoutMs) return $this.Released }
+$stuckCapture | Add-Member ScriptMethod Dispose { $this.Disposed=$true }
+$script:noWakeCapture=$stuckCapture;$script:noWakeMode='observe';$script:noWakePhase='observing'
+Set-NoWakeMode context
+Assert-NoWakeConversation ($script:noWakeMode -eq 'off' -and $script:noWakePhase -eq 'stopping' -and $stuckCapture.StopCalls -eq 1 -and -not $stuckCapture.Disposed) 'Failed capture release did not fail closed.'
+$stuckCapture.Released=$true
+Update-NoWakeConversation
+Assert-NoWakeConversation ($null -eq $script:noWakeCapture -and $script:noWakePhase -eq 'off' -and $stuckCapture.Disposed) 'Off-mode retry did not finish capture release.'
+
 Set-NoWakeMode off
 Assert-NoWakeConversation ($script:noWakeMode -eq 'off' -and $script:noWakePhase -eq 'off') 'Turning no-wake off did not restore the off state.'
 [pscustomobject]@{passed=$true;checks=$checks;routed=$script:routed;boundary='Synthetic state and existing local confirmation parser only; no microphone, ASR, Codex, task mutation or message send.'} | ConvertTo-Json -Compress

@@ -22,6 +22,9 @@ function Set-AssistantPreferences([hashtable]$Values) {
             if ($name -eq 'noWakeMode' -and (Get-Command Set-NoWakeMode -ErrorAction SilentlyContinue)) { Set-NoWakeMode ([string]$Values[$name]) }
             else { Set-Variable -Name $name -Value $Values[$name] -Scope Script }
         }
+        if ($Values.ContainsKey('noWakeMode') -and $script:noWakeMode -cne [string]$Values.noWakeMode) {
+            throw '免唤醒资源尚未安全释放，模式没有切换。'
+        }
         if ($Values.ContainsKey('floatingVisible') -and $window) {
             if ($script:floatingVisible) { $window.Show() } else { $window.Hide() }
         }
@@ -48,7 +51,9 @@ function Invoke-DesktopPreference([hashtable]$Values) {
         # Validation can fail before the transaction starts; restore the
         # initiating control too (for example, a stale voice catalog item).
         try { Sync-DesktopPreferences } catch { }
-        $script:notice='设置没有完成，已保留原设置，请重试。'
+        $script:notice=if ($Values.ContainsKey('noWakeMode') -and $script:noWakePhase -eq 'stopping') {
+            '免唤醒正在安全释放麦克风；当前保持关闭，释放完成后可重试。'
+        } else { '设置没有完成，已保留原设置，请重试。' }
         $script:localCommandMessage=$script:notice
         $script:localCommandNoticeUntil=[DateTime]::UtcNow.AddSeconds(8)
         return $false

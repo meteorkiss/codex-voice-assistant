@@ -336,7 +336,9 @@ function Update-HandsFree([DateTime]$Now = [DateTime]::UtcNow) {
         $script:wakeOwnsMicrophone=$false
         $script:lastMicVersion=$script:mic.ActivationVersion
     }
-    if ((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off') {
+    $noWakeKnown=[bool](Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue)
+    $noWakeBlocks=[bool]($noWakeKnown -and ($script:noWakeMode -ne 'off' -or $script:noWakeCapture -or $script:noWakeAsrJob -or $script:noWakePhase -eq 'stopping'))
+    if ($noWakeBlocks) {
         Suspend-WakeListener
         $script:handsFreePhase=if ($script:handsFreeEnabled) { 'waiting' } else { 'off' }
         return

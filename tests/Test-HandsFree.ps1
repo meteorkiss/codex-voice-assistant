@@ -741,6 +741,23 @@ try {
     Set-FloatingVisible $false
     Assert-That ($script:recMode -eq 'listening' -and $script:recorder.Cancels -eq 0) 'Hiding the floating view must preserve manual recording under the new desktop contract.'
 
+    # Manual recording must not arm while a timed-out no-wake capture still
+    # owns the microphone. The old capture remains explicitly owned for retry.
+    Reset-Case
+    $stuckNoWake=[pscustomobject]@{Stops=0;IsRunning=$true}
+    $stuckNoWake | Add-Member ScriptMethod Stop { $this.Stops++ }
+    $stuckNoWake | Add-Member ScriptMethod StopAndWait { param([int]$TimeoutMs) return $false }
+    $stuckNoWake | Add-Member ScriptMethod Dispose { throw 'Timed-out capture must not be disposed early.' }
+    $script:noWakeMode='observe'; $script:noWakePhase='observing'; $script:noWakeCapture=$stuckNoWake; $script:noWakeAsrJob=$null
+    Set-NoWakeMode context
+    Assert-That ($script:noWakeMode -eq 'off' -and $script:noWakePhase -eq 'stopping' -and [object]::ReferenceEquals($script:noWakeCapture,$stuckNoWake)) 'A failed mode switch did not retain explicit no-wake ownership while failing closed.'
+    Begin-Recording
+    Assert-That ($script:recMode -eq 'idle' -and $script:noWakePhase -eq 'stopping' -and [object]::ReferenceEquals($script:noWakeCapture,$stuckNoWake)) 'Manual recording armed before a timed-out no-wake capture released its microphone.'
+    $script:handsFreeEnabled=$true; $script:nextWakeUtc=[DateTime]::UtcNow.AddMilliseconds(-1)
+    Update-HandsFree ([DateTime]::UtcNow)
+    Assert-That (-not $script:wakeListener.IsListening -and $script:wakeListener.Starts -eq 0) 'Wake listening started while a fail-closed no-wake capture still owned the microphone.'
+    $script:noWakeMode='off'; $script:noWakePhase='off'; $script:noWakeCapture=$null
+
     # Pending automatic sends are invalidated by edits, task changes, or generation changes.
     Reset-Case
     $InputBox.Text='Question'

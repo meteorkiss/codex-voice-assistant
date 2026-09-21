@@ -34,6 +34,7 @@ if (-not $PreviewPath) {
         $mutex.Dispose(); exit
     }
     [IO.File]::WriteAllText((Join-Path $stateDir 'pid.txt'),$PID.ToString())
+    if (-not $TestMode) { Remove-StaleNoWakeFiles $stateDir $runtime }
 }
 $hasExplicitThreadId = -not [string]::IsNullOrWhiteSpace($ThreadId)
 $script:threadId = if ($hasExplicitThreadId) { $ThreadId } else { '' }
@@ -196,7 +197,16 @@ function Begin-Recording([bool]$FromWake = $false) {
     if (-not $script:connected -and $script:bindingAvailability -notin @('archived','missing')) { $script:notice = '先连接一个 Codex 任务。'; return }
     if ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { $script:notice='正在等待发送回执，请稍等再开始录音。'; return }
     if ($script:recMode -ne 'idle' -or $script:asrJob) { return }
-    if ((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off') { Suspend-NoWakeConversation 'manual-recording' }
+    $noWakeKnown=[bool](Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue)
+    $noWakeOwns=[bool]($noWakeKnown -and ($script:noWakeCapture -or $script:noWakeAsrJob -or $script:noWakePhase -eq 'stopping'))
+    if ($noWakeKnown -and ($script:noWakeMode -ne 'off' -or $noWakeOwns)) {
+        if ($script:noWakeMode -ne 'off') { Suspend-NoWakeConversation 'manual-recording' }
+        else { Update-NoWakeConversation }
+        if ($script:noWakeCapture -or $script:noWakeAsrJob -or $script:noWakePhase -eq 'stopping') {
+            $script:notice='免唤醒麦克风仍在释放，请稍后再开始录音。'
+            return
+        }
+    }
     $useEcho=($FromWake -and (Test-FullDuplexReady) -and $script:wakeListener.HasQuestion)
     if (-not $useEcho) { Suspend-WakeListener }
     if (Get-Command Save-VoicePlaybackBookmark -ErrorAction SilentlyContinue) {
@@ -726,6 +736,7 @@ try {
     if ($tray) { $tray.Visible=$false; $tray.Dispose() }
     if ($menu) { $menu.Dispose() }
     if ($desktop) { try { Close-DesktopTopmost $desktop; Close-DesktopShell $desktop } catch {} }
+    if (-not $TestMode -and -not $PreviewPath -and $runtime -and -not $script:noWakeAsrJob) { [void](Remove-NoWakeFilesFromRun $stateDir $runtime) }
     if ($ownsMutex) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
 }

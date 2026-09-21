@@ -56,6 +56,12 @@ try {
         Assert ($failed -and -not $script:pinned -and [IO.File]::ReadAllText($path) -ceq $snapshot) 'Invalid preference reached memory or disk.'
     }
 
+    function Set-NoWakeMode([string]$Mode) { if($Mode -eq 'context'){$script:noWakeMode='off'}else{$script:noWakeMode=$Mode} }
+    $script:noWakeMode='observe';$script:noWakePhase='stopping'
+    $snapshot=[IO.File]::ReadAllText($path);$failed=$false
+    try { Set-AssistantPreferences @{noWakeMode='context'} } catch { $failed=$true }
+    Assert ($failed -and $script:noWakeMode -eq 'observe' -and [IO.File]::ReadAllText($path) -ceq $snapshot) 'A fail-closed no-wake switch was reported or saved as successful.'
+
     $target='11111111-1111-4111-8111-111111111111';$requestId=[Guid]::NewGuid().ToString()
     foreach($entry in @(@('list','list'),@('find','voice-find'),@('read','bind'),@('read','voice-bind'),@('read','voice-create-bind'),@('open','open'),@('send','send'),@('create','voice-create'),@('create-status','voice-create-status'),@('manage','voice-manage'))) {
         Assert-CodexBridgeRequest @{action=$entry[0];threadId=$target;requestId=$requestId;text='fixture'} $entry[1]
@@ -83,6 +89,23 @@ try {
     Assert ((Test-Path -LiteralPath $outside) -and (Test-Path -LiteralPath $runtime -PathType Container)) 'Cleanup escaped runtime or removed a directory.'
     Remove-OwnedFiles @($owned)
     Assert (-not (Test-Path -LiteralPath $owned)) 'Owned completed file was not removed.'
+
+    $cleanupRoot=Join-Path $run 'cleanup-state';[void][IO.Directory]::CreateDirectory($cleanupRoot)
+    $oldRun=Join-Path $cleanupRoot ('run-'+[Guid]::NewGuid().ToString('N'))
+    $currentRun=Join-Path $cleanupRoot ('run-'+[Guid]::NewGuid().ToString('N'))
+    $invalidRun=Join-Path $cleanupRoot 'run-user-files'
+    foreach($directory in @($oldRun,$currentRun,$invalidRun)){[void][IO.Directory]::CreateDirectory($directory);[IO.File]::WriteAllText((Join-Path $directory 'receipt.json'),'preserve')}
+    $oldNoWake=Join-Path $oldRun (([Guid]::NewGuid().ToString('N'))+'.nowake.wav')
+    $oldNoWakeTemp=Join-Path $oldRun (([Guid]::NewGuid().ToString('N'))+'.nowake.asr.json.tmp')
+    $ordinaryTemp=Join-Path $oldRun 'receipt.json.tmp'
+    $currentNoWake=Join-Path $currentRun (([Guid]::NewGuid().ToString('N'))+'.nowake.asr.json')
+    foreach($privateFile in @($oldNoWake,$oldNoWakeTemp,$currentNoWake)){[IO.File]::WriteAllText($privateFile,'private fixture')}
+    [IO.File]::WriteAllText($ordinaryTemp,'preserve')
+    Remove-StaleNoWakeFiles $cleanupRoot $currentRun
+    Assert ((Test-Path -LiteralPath $oldRun) -and -not (Test-Path -LiteralPath $oldNoWake) -and -not (Test-Path -LiteralPath $oldNoWakeTemp) -and (Test-Path -LiteralPath (Join-Path $oldRun 'receipt.json')) -and (Test-Path -LiteralPath $ordinaryTemp)) 'Stale cleanup removed a receipt/run/ordinary temp or retained an owned no-wake file.'
+    Assert ((Test-Path -LiteralPath $currentNoWake) -and (Test-Path -LiteralPath $invalidRun)) 'Stale cleanup touched the current or an unowned directory.'
+    Assert (-not (Remove-NoWakeFilesFromRun $run $currentRun)) 'No-wake cleanup accepted a directory through the wrong state root.'
+    Assert ((Remove-NoWakeFilesFromRun $cleanupRoot $currentRun) -and -not (Test-Path -LiteralPath $currentNoWake) -and (Test-Path -LiteralPath (Join-Path $currentRun 'receipt.json'))) 'Current no-wake cleanup removed a receipt or retained its owned file.'
 
     foreach ($kind in @('completed','cancelled','running','timeout','killFailure','send','voice-create','voice-manage')) {
         $file=Join-Path $runtime ($kind+'.input');[IO.File]::WriteAllText($file,'fixture')

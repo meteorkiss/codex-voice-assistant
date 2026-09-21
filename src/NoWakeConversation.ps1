@@ -70,8 +70,11 @@ function Stop-NoWakeCapture([int]$WaitMilliseconds=3000) {
 
 function Stop-NoWakeAsr {
     if (-not $script:noWakeAsrJob) { return }
-    $job=$script:noWakeAsrJob; $script:noWakeAsrJob=$null
+    $job=$script:noWakeAsrJob
     Close-Job $job -Kill
+    $exited=$false
+    try { $exited=[bool]$job.Process.HasExited } catch { $exited=$true }
+    if ($exited) { $script:noWakeAsrJob=$null }
 }
 
 function Set-NoWakeMode([string]$Mode) {
@@ -79,7 +82,14 @@ function Set-NoWakeMode([string]$Mode) {
     if ($Mode -ceq $script:noWakeMode) { return }
     $script:noWakeGeneration++
     Stop-NoWakeAsr
-    [void](Stop-NoWakeCapture)
+    $released=Stop-NoWakeCapture
+    if (-not $released -or $script:noWakeAsrJob) {
+        $script:noWakeMode='off'
+        $script:noWakePhase='stopping'
+        $script:noWakeLastDecision=$null
+        $script:notice='免唤醒正在安全释放麦克风和本地识别；释放前不会处理或执行新结果。'
+        return
+    }
     $script:noWakeMode=$Mode
     $script:noWakeLastDecision=$null
     $script:noWakeLastError=''
@@ -98,10 +108,17 @@ function Set-NoWakeMode([string]$Mode) {
 
 function Suspend-NoWakeConversation([string]$Reason) {
     if ($script:noWakeMode -eq 'off') { return }
+    $released=$true
     if ($script:noWakePhase -ne 'paused' -or $script:noWakeCapture -or $script:noWakeAsrJob) {
         $script:noWakeGeneration++
         Stop-NoWakeAsr
-        [void](Stop-NoWakeCapture)
+        $released=Stop-NoWakeCapture
+    }
+    if (-not $released -or $script:noWakeAsrJob) {
+        $script:noWakePhase='stopping'
+        $script:noWakeNextStartUtc=[DateTime]::UtcNow.AddMilliseconds(800)
+        $script:notice='免唤醒正在安全释放麦克风和本地识别；释放前不会启动其他录音。'
+        return
     }
     $script:noWakePhase='paused'
     $script:noWakeNextStartUtc=[DateTime]::UtcNow.AddMilliseconds(800)
@@ -115,11 +132,18 @@ function Suspend-NoWakeConversation([string]$Reason) {
 }
 
 function Start-NoWakeTranscription($Segment) {
+    if (-not $Segment -or $Segment.Generation -ne $script:noWakeGeneration) { return }
     $wavePath=Join-Path $runtime ([Guid]::NewGuid().ToString('N')+'.nowake.wav')
     $resultPath=Join-Path $runtime ([Guid]::NewGuid().ToString('N')+'.nowake.asr.json')
-    [NoWakeCapture]::WriteWave($wavePath,$Segment.Pcm)
-    $proc=Start-Worker $asrPython (Join-Path $PSScriptRoot 'transcribe.py') @('--input',$wavePath,'--output',$resultPath,'--model-dir',$modelDir)
-    $script:noWakeAsrJob=@{Process=$proc;Purpose='no-wake-transcribe';Output=$resultPath;Files=@($resultPath,$wavePath);
+    $resultTemporary=$resultPath+'.tmp'
+    try {
+        [NoWakeCapture]::WriteWave($wavePath,$Segment.Pcm)
+        $proc=Start-Worker $asrPython (Join-Path $PSScriptRoot 'transcribe.py') @('--input',$wavePath,'--output',$resultPath,'--model-dir',$modelDir)
+    } catch {
+        Remove-OwnedFiles @($resultPath,$resultTemporary,$wavePath)
+        throw
+    }
+    $script:noWakeAsrJob=@{Process=$proc;Purpose='no-wake-transcribe';Output=$resultPath;Files=@($resultPath,$resultTemporary,$wavePath);
         Generation=$script:noWakeGeneration;CaptureGeneration=$Segment.Generation;ThreadId=[string]$script:threadId;
         BindingGeneration=$script:bindingGeneration;Context=(Get-NoWakeContextSnapshot);
         Evidence=@{DurationSeconds=$Segment.DurationSeconds;EndReason=$Segment.EndReason;Rms=$Segment.Rms;Peak=$Segment.Peak}}
@@ -138,6 +162,7 @@ function Invoke-NoWakeContextDecision([string]$Text,$Decision,$Snapshot) {
     if ($script:noWakeMode -ne 'context' -or $Decision.Route -ne 'context-confirmation' -or
         -not (Test-NoWakeContextStillCurrent $Snapshot) -or $Decision.ContextId -cne $Snapshot.ContextId -or
         $script:closing -or $script:recMode -ne 'idle' -or $script:bridgeJob -or $script:pendingUncertain -or
+        ($script:pendingSends -and $script:pendingSends.ContainsKey($script:threadId)) -or $script:manualTaskBinding -or $script:voiceTaskCreate -or
         $InputBox.Text.Trim() -or $script:bindingAvailability -in @('archived','missing','unknown') -or $script:bindingReadError) { return $false }
     if (-not (Stop-NoWakeCapture)) { return $false }
     $script:noWakePhase='routing'
@@ -161,7 +186,8 @@ function Complete-NoWakeTranscription([DateTime]$Now) {
     try { $result=if (Test-Path -LiteralPath $job.Output) { Get-Content -LiteralPath $job.Output -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null } } catch { $result=$null }
     $code=$job.Process.ExitCode
     Close-Job $job
-    $stale=($job.Generation -ne $script:noWakeGeneration -or $job.ThreadId -cne [string]$script:threadId -or
+    $stale=($job.Generation -ne $script:noWakeGeneration -or $job.CaptureGeneration -ne $job.Generation -or
+        $job.ThreadId -cne [string]$script:threadId -or
         $job.BindingGeneration -ne $script:bindingGeneration -or $script:noWakeMode -eq 'off' -or $script:closing)
     if ($code -ne 0 -or -not $result -or -not $result.ok -or $result.error) {
         if (-not $stale) {
@@ -198,9 +224,10 @@ function Complete-NoWakeTranscription([DateTime]$Now) {
 
 function Update-NoWakeConversation([DateTime]$Now=[DateTime]::UtcNow) {
     if ($script:noWakeMode -eq 'off') {
-        if ($script:noWakeCapture) { [void](Stop-NoWakeCapture) }
+        $released=$true
+        if ($script:noWakeCapture) { $released=Stop-NoWakeCapture }
         if ($script:noWakeAsrJob) { Stop-NoWakeAsr }
-        $script:noWakePhase='off'
+        $script:noWakePhase=if ($released -and -not $script:noWakeAsrJob) { 'off' } else { 'stopping' }
         return
     }
     Complete-NoWakeTranscription $Now
