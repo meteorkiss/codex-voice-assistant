@@ -231,7 +231,9 @@ function Test-ExternalCapture {
         if ($session.Active -and [int]$session.ProcessId -ne $PID) { return $true }
     }
     # A missing session identity must never be treated as permission to play.
-    return ($script:mic.AnyCaptureActive -and -not $script:wakeOwnsMicrophone -and $script:recMode -eq 'idle')
+    $noWakeOwns=[bool]((Get-Variable -Name noWakeCapture -Scope Script -ErrorAction SilentlyContinue) -and
+        $script:noWakeCapture -and $script:noWakeCapture.IsRunning)
+    return ($script:mic.AnyCaptureActive -and -not $script:wakeOwnsMicrophone -and -not $noWakeOwns -and $script:recMode -eq 'idle')
 }
 
 function Suspend-WakeListener {
@@ -333,6 +335,11 @@ function Update-HandsFree([DateTime]$Now = [DateTime]::UtcNow) {
         $script:mic.ScanCount -gt $script:wakeReleaseScan -and -not $script:mic.AnyCaptureActive) {
         $script:wakeOwnsMicrophone=$false
         $script:lastMicVersion=$script:mic.ActivationVersion
+    }
+    if ((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off') {
+        Suspend-WakeListener
+        $script:handsFreePhase=if ($script:handsFreeEnabled) { 'waiting' } else { 'off' }
+        return
     }
     if ($script:closing -or -not $script:handsFreeEnabled) { Suspend-WakeListener; return }
     if (Test-WakeRecoveryPending) { return }

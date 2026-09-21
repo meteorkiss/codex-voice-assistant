@@ -99,6 +99,7 @@ $script:pendingPath = Join-Path $stateDir 'pending-sends.json'
 $script:lastPendingCheck = [DateTime]::MinValue
 $script:speechQueue = New-Object 'System.Collections.Generic.Queue[string]'
 . (Join-Path $PSScriptRoot 'HandsFree.ps1')
+. (Join-Path $PSScriptRoot 'NoWakeConversation.ps1')
 . (Join-Path $PSScriptRoot 'WakePhrase.ps1')
 Initialize-AssistantSettings
 Initialize-BindingRecovery
@@ -115,7 +116,8 @@ function Safe-To-Play {
     if (Test-WakeRecoveryPending) { return $false }
     if ($script:recMode -ne 'idle' -or -not $script:mic.Ready -or $script:mic.LastError) { return $false }
     if (Test-FullDuplexReady) { return $true }
-    if ($script:handsFreeEnabled -and $script:bargeInEnabled -and -not $TestMode) { return $false }
+    $noWakeActive=[bool]((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off')
+    if ($script:handsFreeEnabled -and $script:bargeInEnabled -and -not $TestMode -and -not $noWakeActive) { return $false }
     return (-not $script:mic.AnyCaptureActive -and -not $script:wakeOwnsMicrophone -and
         (-not $script:wakeListener -or (-not $script:wakeListener.IsListening -and -not $script:wakeListener.IsStopping)))
 }
@@ -194,6 +196,7 @@ function Begin-Recording([bool]$FromWake = $false) {
     if (-not $script:connected -and $script:bindingAvailability -notin @('archived','missing')) { $script:notice = '先连接一个 Codex 任务。'; return }
     if ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { $script:notice='正在等待发送回执，请稍等再开始录音。'; return }
     if ($script:recMode -ne 'idle' -or $script:asrJob) { return }
+    if ((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off') { Suspend-NoWakeConversation 'manual-recording' }
     $useEcho=($FromWake -and (Test-FullDuplexReady) -and $script:wakeListener.HasQuestion)
     if (-not $useEcho) { Suspend-WakeListener }
     if (Get-Command Save-VoicePlaybackBookmark -ErrorAction SilentlyContinue) {
@@ -264,6 +267,7 @@ function Apply-Thread($Result) {
     $script:taskBindingStage='apply-target'
     if ($script:threadId -ne $Result.threadId) {
         if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标任务已改变，连续接话已结束。' -CancelCapture }
+        if ((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off') { Suspend-NoWakeConversation 'target-change' }
         Suspend-WakeListener
         $script:voiceGeneration++; $script:autoDispatch=$null
         $script:handsFreePhase=if ($script:handsFreeEnabled) { 'waiting' } else { 'off' }
@@ -397,14 +401,16 @@ try {
             if (-not $script:bridgeJob -and ($now-$script:lastPendingCheck).TotalSeconds -ge 1) { Reconcile-PendingSends; $script:lastPendingCheck=$now }
             $micVersion=$script:mic.ActivationVersion
             if ($micVersion -ne $script:lastMicVersion) {
-                if (-not $script:wakeOwnsMicrophone) { Stop-Output }
+                $noWakeOwns=[bool]((Get-Variable -Name noWakeCapture -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeCapture -and $script:noWakeCapture.IsRunning)
+                if (-not $script:wakeOwnsMicrophone -and -not $noWakeOwns) { Stop-Output }
                 $script:lastMicVersion=$micVersion; $script:interrupted++
             }
             $waitingForWakeRelease=($script:wakeOwnsMicrophone -and $script:recMode -eq 'idle' -and -not (Test-ExternalCapture) -and [CodexReader.AudioPlayer]::State -notin @('playing','paused'))
             # A read/bind can finish after the old echo listener fully released
             # its microphone. Keep unstarted feedback while the replacement
             # pipeline warms up; Safe-To-Play still gates synthesis/playback.
-            $waitingForEchoStartup=($script:handsFreeEnabled -and $script:bargeInEnabled -and -not $TestMode -and
+            $noWakeActive=[bool]((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off')
+            $waitingForEchoStartup=(-not $noWakeActive -and $script:handsFreeEnabled -and $script:bargeInEnabled -and -not $TestMode -and
                 $script:recMode -eq 'idle' -and $script:speechQueue.Count -gt 0 -and -not $script:ttsJob -and
                 [CodexReader.AudioPlayer]::State -notin @('playing','paused') -and ($script:connected -or $script:bindingAvailability -in @('archived','missing')) -and
                 -not $script:pendingUncertain -and -not $script:autoDispatch -and -not $InputBox.Text.Trim() -and
@@ -415,6 +421,7 @@ try {
                 -not (Test-ExternalCapture) -and [CodexReader.AudioPlayer]::State -notin @('playing','paused'))
             if (-not (Safe-To-Play) -and -not $waitingForWakeRelease -and -not $waitingForEchoStartup -and -not $waitingForWakeRecovery -and ($script:ttsJob -or $script:speechQueue.Count -gt 0 -or [CodexReader.AudioPlayer]::State -in @('playing','paused'))) { Stop-Output }
             Update-HandsFree $now
+            if (Get-Command Update-NoWakeConversation -ErrorAction SilentlyContinue) { Update-NoWakeConversation $now }
 
             $captureReady=($script:echoQuestionCapture -and (Test-FullDuplexReady)) -or (-not $script:wakeOwnsMicrophone -and -not $script:wakeListener.IsListening -and -not $script:wakeListener.IsStopping)
             if ($script:recMode -eq 'arming' -and $now -ge $script:armDue -and $captureReady) {
@@ -549,6 +556,9 @@ try {
                 elseif ($now -lt $script:localCommandNoticeUntil) { $script:localCommandMessage + $(if ($script:pendingUncertain) { ' · 上次发送仍待核对' } elseif ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { ' · 消息正在发送' }) }
                 elseif ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { '正在发送给 Codex…' }
                 elseif ($script:pendingUncertain) { '发送状态待确认 · 请在 Codex 核对' }
+                elseif ($script:noWakeMode -ne 'off' -and $script:noWakePhase -eq 'transcribing') { '免唤醒 · 正在本机试判（不会发送普通话语）' }
+                elseif ($script:noWakeMode -ne 'off' -and $script:noWakePhase -eq 'observing') { if ($script:noWakeMode -eq 'observe') { '免唤醒仅试判 · 正在听（不执行）' } else { '免唤醒实验 · 仅等待当前候选确认' } }
+                elseif ($script:noWakeMode -ne 'off' -and $script:noWakePhase -in @('starting','paused','error','stopping')) { $script:notice }
                 elseif ($script:handsFreeEnabled -and (Test-WakeRecoveryPending)) { $script:wakeRecovery.Message }
                 elseif ($script:handsFreePhase -in @('releasing','answering-wake','acknowledging')) { '在 · 请说你的问题' }
                 elseif ($script:recoveryDraftError) { $script:recoveryDraftError }
@@ -571,7 +581,7 @@ try {
             $SendButton.IsEnabled=($localReady -or ($script:connected -and $script:bindingAvailability -notin @('archived','missing','unknown') -and -not $script:bindingReadError -and -not $script:bridgeJob -and $script:recMode -ne 'arming' -and -not $script:pendingUncertain))
             $StopButton.Content=if ($script:shortFollowUp -or $script:followUpCapture) { '结束接话' } elseif ($script:recMode -ne 'idle') { '取消录音' } else { '停止朗读' }
             $AnswerStateLabel.Text=if ($script:busy) { '处理中' } elseif ($playing) { '正在朗读' } else { '文字 · 语音' }
-            $FooterHint.Text=if ($script:shortFollowUp -or $script:followUpCapture) { '连续接话有时限 · 可随时点“结束接话”' } elseif ($script:handsFreeEnabled -and $script:recMode -eq 'idle' -and $InputBox.Text.Trim()) { '草稿已保留 · 发送或自行清空后恢复唤醒；也可点击开始说话继续补充' } elseif ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
+            $FooterHint.Text=if ($script:shortFollowUp -or $script:followUpCapture) { '连续接话有时限 · 可随时点“结束接话”' } elseif ($script:noWakeMode -eq 'observe') { '免唤醒仅试判 · 不执行、不发送 · 可在设置中关闭' } elseif ($script:noWakeMode -eq 'context') { '免唤醒实验 · 仅限当前候选确认 · 可在设置中关闭' } elseif ($script:handsFreeEnabled -and $script:recMode -eq 'idle' -and $InputBox.Text.Trim()) { '草稿已保留 · 发送或自行清空后恢复唤醒；也可点击开始说话继续补充' } elseif ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
             if ($followUpItem) { $followUpItem.Enabled=[bool]($script:shortFollowUp -or $script:followUpCapture) }
             Update-DesktopDisplay
             if ($script:positionDirty -and ($now-$script:lastPositionChange).TotalMilliseconds -gt 700) { $script:positionDirty=$false; Save-Settings }
@@ -607,7 +617,7 @@ try {
             $StatusLabel.Text=$script:notice
         }
         if ($StatusPath -and ([DateTime]::UtcNow-$script:lastStatusWrite).TotalMilliseconds -ge 250) {
-            $statusData=@{version=7;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;shortFollowUpPhase=if($script:shortFollowUp){$script:shortFollowUp.Phase}else{'idle'};followUpCapture=$script:followUpCapture;echoReady=(Test-FullDuplexReady);echoQuestionCapture=$script:echoQuestionCapture;handsFreeEnabled=$script:handsFreeEnabled;handsFreePhase=$script:handsFreePhase;wakePhrase=$script:wakePhrase;wakeCount=$script:wakeCount;wakeListening=$script:wakeListener.IsListening;wakeReady=$script:wakeListener.IsReady;autoSendPrepared=$script:autoSendPrepared;connected=$script:connected;threadId=$script:threadId;recordingMode=$script:recMode;level=$script:level;status=$StatusLabel.Text;received=$script:received;spoken=$script:spoken;sent=$script:sent;busy=$script:busy;error=$script:errorText;micReady=$script:mic.Ready;micActive=$script:mic.AnyCaptureActive;topmost=$window.Topmost;windowVisible=$window.IsVisible;voice=$script:voiceId;autoSend=$script:autoSend;playerState=[CodexReader.AudioPlayer]::State;compact=(-not $script:captionsVisible);style=$script:waveStyle;waveSize=$script:waveSize;speechRate=$script:speechRate;autoRead=$script:autoRead;settingsVisible=$desktop.SettingsWindow.IsVisible;captionVisible=$desktop.CaptionWindow.IsVisible;pid=$PID}
+            $statusData=@{version=8;noWakeMode=$script:noWakeMode;noWakePhase=$script:noWakePhase;noWakeJudgmentCount=$script:noWakeJudgmentCount;noWakeAcceptedCount=$script:noWakeAcceptedCount;noWakeLastDecision=$script:noWakeLastDecision;noWakeDroppedSegments=if($script:noWakeCapture){$script:noWakeCapture.DroppedCount}else{0};noWakeError=$script:noWakeLastError;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;shortFollowUpPhase=if($script:shortFollowUp){$script:shortFollowUp.Phase}else{'idle'};followUpCapture=$script:followUpCapture;echoReady=(Test-FullDuplexReady);echoQuestionCapture=$script:echoQuestionCapture;handsFreeEnabled=$script:handsFreeEnabled;handsFreePhase=$script:handsFreePhase;wakePhrase=$script:wakePhrase;wakeCount=$script:wakeCount;wakeListening=$script:wakeListener.IsListening;wakeReady=$script:wakeListener.IsReady;autoSendPrepared=$script:autoSendPrepared;connected=$script:connected;threadId=$script:threadId;recordingMode=$script:recMode;level=$script:level;status=$StatusLabel.Text;received=$script:received;spoken=$script:spoken;sent=$script:sent;busy=$script:busy;error=$script:errorText;micReady=$script:mic.Ready;micActive=$script:mic.AnyCaptureActive;topmost=$window.Topmost;windowVisible=$window.IsVisible;voice=$script:voiceId;autoSend=$script:autoSend;playerState=[CodexReader.AudioPlayer]::State;compact=(-not $script:captionsVisible);style=$script:waveStyle;waveSize=$script:waveSize;speechRate=$script:speechRate;autoRead=$script:autoRead;settingsVisible=$desktop.SettingsWindow.IsVisible;captionVisible=$desktop.CaptionWindow.IsVisible;pid=$PID}
             if ($TestMode) { $statusData.inputText=$InputBox.Text; $statusData.answerText=$AnswerBox.Text; $statusData.testCommand=$script:lastTestCommand; $statusData.taskCandidateCount=@($script:taskCandidates).Count; $statusData.selectedTaskId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' } }
             $statusData.localCommandCount=$script:localCommandCount
             $statusData.bindingHealthy=($script:connected -and $script:bindingAvailability -notin @('archived','missing','unknown') -and -not $script:bindingReadError)
@@ -681,7 +691,7 @@ try {
             $script:lastStatusWrite=[DateTime]::UtcNow
         }
     })
-    $window.Add_Closed({ $script:closing=$true; if (Get-Command Close-BindingProbe -ErrorAction SilentlyContinue) { Close-BindingProbe }; Reset-ManualTaskBinding; Reset-VoiceTaskSwitch; Invalidate-VoiceTaskCreateBinding -Reason '声伴已关闭'; $script:voiceGeneration++; $script:autoDispatch=$null; Suspend-WakeListener; $timer.Stop(); Stop-Output; if ($script:recMode -ne 'idle') { Cancel-Recording }; if (-not $PreviewPath) { $window.Dispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background) } })
+    $window.Add_Closed({ $script:closing=$true; if (Get-Command Close-BindingProbe -ErrorAction SilentlyContinue) { Close-BindingProbe }; Reset-ManualTaskBinding; Reset-VoiceTaskSwitch; Invalidate-VoiceTaskCreateBinding -Reason '声伴已关闭'; $script:voiceGeneration++; $script:autoDispatch=$null; if (Get-Command Close-NoWakeConversation -ErrorAction SilentlyContinue) { Close-NoWakeConversation }; Suspend-WakeListener; $timer.Stop(); Stop-Output; if ($script:recMode -ne 'idle') { Cancel-Recording }; if (-not $PreviewPath) { $window.Dispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background) } })
     if ($PreviewPath) {
         $TaskLabel.Text='当前 Codex 任务'; $StatusLabel.Text='点击开始说话'; $window.Show(); $window.UpdateLayout()
         $render=New-Object Windows.Media.Imaging.RenderTargetBitmap([int]$window.ActualWidth,[int]$window.ActualHeight,96,96,[Windows.Media.PixelFormats]::Pbgra32)
@@ -704,6 +714,7 @@ try {
     Reset-VoiceTaskSwitch
     Invalidate-VoiceTaskCreateBinding -Reason '声伴已退出'
     if ($timer) { $timer.Stop() }
+    if (Get-Command Close-NoWakeConversation -ErrorAction SilentlyContinue) { Close-NoWakeConversation }
     Stop-Output
     if ($script:wakeListener) { $script:wakeListener.Dispose() }
     if ($script:recorder) { $script:recorder.Dispose() }

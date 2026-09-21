@@ -87,6 +87,8 @@
               <TextBlock Name="WakeHintLabel" Text="2—16 个汉字，建议 4—6 字；听到‘在’后开始说话。" Style="{StaticResource Note}" Margin="0,0,0,7"/><Border Style="{StaticResource Divider}"/>
               <CheckBox Name="BargeInToggle" Content="朗读时也可唤醒" MinHeight="33"/><TextBlock Name="EchoStatusLabel" Text="" Style="{StaticResource Note}" Margin="0,0,0,6"/><Border Style="{StaticResource Divider}"/>
               <CheckBox Name="ShortFollowUpToggle" Content="回答后短时连续接话（默认关闭）" MinHeight="33"/><TextBlock Text="仅在唤醒交流的回答朗读完毕后等待 6 秒；单句最长 30 秒。" Style="{StaticResource Note}" Margin="0,0,0,6"/><Border Style="{StaticResource Divider}"/>
+              <Grid Margin="0,7"><Grid.ColumnDefinitions><ColumnDefinition Width="112"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="免唤醒实验" VerticalAlignment="Center"/><ComboBox Name="NoWakeModeCombo" Grid.Column="1" AutomationProperties.Name="免唤醒实验模式"/></Grid>
+              <TextBlock Name="NoWakeStatusLabel" Text="默认关闭。仅试判不会执行；上下文确认只处理当前候选的是、否、取消或编号。" Style="{StaticResource Note}" Margin="0,0,0,7"/><Border Style="{StaticResource Divider}"/>
               <CheckBox Name="AutoSendToggle" Content="手动录音停顿后自动发送" MinHeight="33"/>
             </StackPanel></Border>
           </StackPanel>

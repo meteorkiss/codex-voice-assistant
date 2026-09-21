@@ -43,7 +43,7 @@ function Get-ProductionHandler([string]$Control, [string]$Method, $Tree=$ast) {
     if ($matches.Count -ne 1) { throw "Expected one $Control.$Method handler, got $($matches.Count)." }
     return $matches[0].Arguments[0].ScriptBlock.GetScriptBlock()
 }
-foreach ($name in @('Stop-Output','Test-FullDuplexReady','Safe-To-Play','Begin-Recording','Cancel-Recording','Send-Text','Apply-Thread')) {
+foreach ($name in @('Stop-Output','Test-FullDuplexReady','Safe-To-Play','Begin-Recording','Cancel-Recording','Send-Text','Apply-Thread','Read-BoundTaskAnswers')) {
     $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if (-not $definition) { throw "Production function missing: $name" }
     . ([scriptblock]::Create($definition.Extent.Text))

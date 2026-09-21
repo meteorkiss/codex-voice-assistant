@@ -37,6 +37,7 @@ internal static class Launcher
                 @"src\AudioPlayer.cs", @"src\AudioBootstrap.ps1", @"src\EchoCapture.cs",
                 @"src\MicGuard.cs", @"src\JarvisRecorder.cs",
                 @"src\WakeListener.cs", @"src\HandsFree.ps1", @"src\WakeRecovery.ps1",
+                @"src\NoWakeCapture.cs", @"src\NoWakeDecision.ps1", @"src\NoWakeConversation.ps1",
                 @"src\DesktopShell.ps1", @"src\DesktopController.ps1", @"src\WaveformView.cs",
                 @"src\DesktopTopmost.ps1", @"src\DesktopTopmost.cs",
                 @"src\VoiceCommands.ps1", @"src\LocalCommands.ps1",

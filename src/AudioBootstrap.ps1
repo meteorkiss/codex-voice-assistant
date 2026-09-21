@@ -10,5 +10,5 @@ foreach($audioDll in @('NAudio.Core.dll','NAudio.Wasapi.dll')) {
     $audioReferences+=$audioDllPath
 }
 if(-not('CodexReader.AudioPlayer' -as [type])) {
-    Add-Type -Path @((Join-Path $PSScriptRoot 'AudioPlayer.cs'),(Join-Path $PSScriptRoot 'EchoCapture.cs'),(Join-Path $PSScriptRoot 'WakeListener.cs')) -ReferencedAssemblies $audioReferences
+    Add-Type -Path @((Join-Path $PSScriptRoot 'AudioPlayer.cs'),(Join-Path $PSScriptRoot 'EchoCapture.cs'),(Join-Path $PSScriptRoot 'WakeListener.cs'),(Join-Path $PSScriptRoot 'NoWakeCapture.cs')) -ReferencedAssemblies $audioReferences
 }

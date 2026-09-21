@@ -152,6 +152,8 @@ function Initialize-TestDoubles {
     $script:recorder=New-FakeRecorder
 }
 
+. (Join-Path $SourceRoot 'NoWakeConversation.ps1')
+
 if ($HelpersOnly) {
     Initialize-TestDoubles
     Write-Output 'Hands-free test doubles initialized; behavior scenarios have not run.'

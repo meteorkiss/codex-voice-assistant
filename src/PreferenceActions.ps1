@@ -12,19 +12,26 @@ function Set-AssistantPreferences([hashtable]$Values) {
             { $_ -in @('pinned','captionsVisible','floatingVisible','autoRead','autoSend','shortFollowUpEnabled') } {
                 if ($value -isnot [bool]) { throw '设置开关必须是真或假。' }
             }
+            'noWakeMode' { if ($value -isnot [string] -or $value -notin @('off','observe','context')) { throw '这个免唤醒模式暂时不可用。' } }
             default { throw '暂不支持这个设置。' }
         }
         $before[$name]=Get-Variable -Name $name -Scope Script -ValueOnly
     }
     try {
-        foreach ($name in $Values.Keys) { Set-Variable -Name $name -Value $Values[$name] -Scope Script }
+        foreach ($name in $Values.Keys) {
+            if ($name -eq 'noWakeMode' -and (Get-Command Set-NoWakeMode -ErrorAction SilentlyContinue)) { Set-NoWakeMode ([string]$Values[$name]) }
+            else { Set-Variable -Name $name -Value $Values[$name] -Scope Script }
+        }
         if ($Values.ContainsKey('floatingVisible') -and $window) {
             if ($script:floatingVisible) { $window.Show() } else { $window.Hide() }
         }
         Sync-DesktopPreferences
         Save-Settings
     } catch {
-        foreach ($name in $before.Keys) { Set-Variable -Name $name -Value $before[$name] -Scope Script }
+        foreach ($name in $before.Keys) {
+            if ($name -eq 'noWakeMode' -and (Get-Command Set-NoWakeMode -ErrorAction SilentlyContinue)) { Set-NoWakeMode ([string]$before[$name]) }
+            else { Set-Variable -Name $name -Value $before[$name] -Scope Script }
+        }
         try {
             if ($Values.ContainsKey('floatingVisible') -and $window) {
                 if ($script:floatingVisible) { $window.Show() } else { $window.Hide() }

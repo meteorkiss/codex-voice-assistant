@@ -3,6 +3,9 @@
 . (Join-Path $PSScriptRoot 'DesktopTopmost.ps1')
 . (Join-Path $PSScriptRoot 'PreferenceActions.ps1')
 . (Join-Path $PSScriptRoot 'AudioOutput.ps1')
+function Test-NoWakeModeActive {
+    return [bool]((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off')
+}
 function Show-AssistantSettings {
     Show-DesktopSettings $desktop
     if (-not $script:tasksLoaded -and -not $script:bridgeJob) { Refresh-AssistantTasks }
@@ -58,6 +61,9 @@ function Update-AssistantAudioLevel {
     } elseif ($state -eq 'playing') {
         $target=[double][CodexReader.AudioPlayer]::Level
         $script:levelSource='playback'
+    } elseif ((Get-Variable -Name noWakeCapture -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeCapture -and $script:noWakeCapture.IsReady) {
+        $target=[double]$script:noWakeCapture.AudioLevel/100.0
+        $script:levelSource='microphone'
     } elseif ($state -ne 'paused' -and $script:wakeListener -and $script:wakeListener.IsListening -and $script:wakeListener.IsReady) {
         $target=[double]$script:wakeListener.AudioLevel/100.0
         $script:levelSource='microphone'
@@ -153,6 +159,10 @@ function Sync-DesktopPreferences {
         $HandsFreeToggle.IsChecked=$script:handsFreeEnabled
         if ($desktop.Controls.ContainsKey('BargeInToggle')) { $desktop.Controls.BargeInToggle.IsChecked=$script:bargeInEnabled }
         if ($desktop.Controls.ContainsKey('ShortFollowUpToggle')) { $desktop.Controls.ShortFollowUpToggle.IsChecked=$script:shortFollowUpEnabled }
+        if ($desktop.Controls.ContainsKey('NoWakeModeCombo')) {
+            $mode=if (Test-NoWakeModeActive) { $script:noWakeMode } else { 'off' }
+            foreach ($entry in $desktop.Controls.NoWakeModeCombo.Items) { if ($entry.id -ceq $mode) { $desktop.Controls.NoWakeModeCombo.SelectedItem=$entry; break } }
+        }
         $AutoSendToggle.IsChecked=$script:autoSend
         $AutoReadToggle.IsChecked=$script:autoRead
         $MenuVisibility.Header=if ($script:floatingVisible) { '隐藏悬浮声波' } else { '显示悬浮声波' }
@@ -202,6 +212,14 @@ function Update-DesktopDisplay {
     if ($desktop.Controls.ContainsKey('EchoStatusLabel')) {
         $desktop.Controls.EchoStatusLabel.Text=if ($script:wakeListener -and $script:wakeListener.Error) { '音频设备未就绪：'+$script:wakeListener.Error } elseif (-not $script:bargeInEnabled) { '轮流听说：朗读结束后恢复语音唤醒。' } elseif (-not $script:handsFreeEnabled) { '开启语音唤醒后检查回声消除设备。' } elseif (Test-FullDuplexReady) { '回声消除已就绪，朗读中可喊“'+$script:wakePhrase+'”。' } else { '正在准备回声消除；设备不兼容时可关闭此选项。' }
     }
+    if ($desktop.Controls.ContainsKey('NoWakeStatusLabel')) {
+        $mode=if (Test-NoWakeModeActive) { $script:noWakeMode } else { 'off' }
+        $lastDecision=if (Get-Variable -Name noWakeLastDecision -Scope Script -ErrorAction SilentlyContinue) { $script:noWakeLastDecision } else { $null }
+        $desktop.Controls.NoWakeStatusLabel.Text=if ($mode -eq 'off') { '默认关闭。开启后仅在本机短时处理，不保存背景录音或全文。' }
+            elseif ($lastDecision) { [string]$lastDecision.Display }
+            elseif ($mode -eq 'observe') { '仅试判：普通话语不会执行或发送。' }
+            else { '实验交互：只处理当前、未过期候选的是、否、取消或编号。' }
+    }
     if ($desktop.Controls.ContainsKey('MenuFollowUpEnd')) { $desktop.Controls.MenuFollowUpEnd.IsEnabled=[bool]($script:shortFollowUp -or $script:followUpCapture) }
     # A failed/currently unavailable target must remain selectable again, even
     # when its ID is still saved. Selecting an already selected WPF row emits
@@ -234,6 +252,10 @@ function Initialize-DesktopController {
     foreach ($entry in @(@{name='0.8× · 慢一些';value=-20},@{name='1.0× · 正常';value=0},@{name='1.2× · 快一些';value=20},@{name='1.5× · 更快';value=50})) { [void]$RateCombo.Items.Add([pscustomobject]$entry) }
     $StyleCombo.DisplayMemberPath='name'
     foreach ($entry in @(@{id='rays';name='流光环'},@{id='halo';name='柔光环'},@{id='particles';name='微粒环'},@{id='minimal';name='细线环'},@{id='bars';name='律动音柱'},@{id='flow';name='流动声线'})) { [void]$StyleCombo.Items.Add([pscustomobject]$entry) }
+    if ($desktop.Controls.ContainsKey('NoWakeModeCombo')) {
+        $desktop.Controls.NoWakeModeCombo.DisplayMemberPath='name'
+        foreach ($entry in @(@{id='off';name='关闭（默认）'},@{id='observe';name='仅试判 · 不执行'},@{id='context';name='仅上下文确认 · 实验'})) { [void]$desktop.Controls.NoWakeModeCombo.Items.Add([pscustomobject]$entry) }
+    }
     $script:syncingUi=$false
     if ($desktop.Controls.ContainsKey('WakePhraseBox')) {
         $desktop.Controls.WakePhraseBox.Text=$script:wakePhrase
@@ -266,16 +288,24 @@ function Initialize-DesktopController {
             }
         })
     }
+    if ($desktop.Controls.ContainsKey('NoWakeModeCombo')) {
+        $desktop.Controls.NoWakeModeCombo.Add_SelectionChanged({
+            if (-not $script:syncingUi -and $desktop.Controls.NoWakeModeCombo.SelectedItem) {
+                [void](Invoke-DesktopPreference @{noWakeMode=[string]$desktop.Controls.NoWakeModeCombo.SelectedItem.id})
+            }
+        })
+    }
     $AutoReadToggle.Add_Click({ [void](Invoke-DesktopPreference @{autoRead=[bool]$AutoReadToggle.IsChecked}) })
     $AutoSendToggle.Add_Click({ [void](Invoke-DesktopPreference @{autoSend=[bool]$AutoSendToggle.IsChecked}) })
     $VoiceCombo.Add_SelectionChanged({ if (-not $script:syncingUi -and $VoiceCombo.SelectedItem) { [void](Invoke-DesktopPreference @{voiceId=[string]$VoiceCombo.SelectedItem.id}) } })
     $RateCombo.Add_SelectionChanged({ if (-not $script:syncingUi -and $RateCombo.SelectedItem) { [void](Invoke-DesktopPreference @{speechRate=[int]$RateCombo.SelectedItem.value}) } })
     $StyleCombo.Add_SelectionChanged({ if (-not $script:syncingUi -and $StyleCombo.SelectedItem) { [void](Invoke-DesktopPreference @{waveStyle=[string]$StyleCombo.SelectedItem.id}) } })
     $SizeSlider.Add_ValueChanged({ if (-not $script:syncingUi) { [void](Invoke-DesktopPreference @{waveSize=[int]$SizeSlider.Value}) } })
-    $DirectoryCombo.Add_SelectionChanged({ if (-not $script:syncingUi) { if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标筛选已改变，连续接话已结束。' -CancelCapture }; Reset-ManualTaskBinding '目录筛选已改变，取消上次连接。'; Invalidate-VoiceTaskCreateBinding -Reason '已手动改变目录筛选'; Reset-VoiceTaskSwitch; Update-TaskSelection; Save-Settings } })
+    $DirectoryCombo.Add_SelectionChanged({ if (-not $script:syncingUi) { if (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) { Close-ShortFollowUp '目标筛选已改变，连续接话已结束。' -CancelCapture }; if (Test-NoWakeModeActive) { Suspend-NoWakeConversation 'target-change' }; Reset-ManualTaskBinding '目录筛选已改变，取消上次连接。'; Invalidate-VoiceTaskCreateBinding -Reason '已手动改变目录筛选'; Reset-VoiceTaskSwitch; Update-TaskSelection; Save-Settings } })
     $RefreshTasksButton.Add_Click({ Refresh-AssistantTasks })
     $TaskCombo.Add_SelectionChanged({
         if (-not $script:syncingUi) {
+            if (Test-NoWakeModeActive) { Suspend-NoWakeConversation 'target-change' }
             $selectedId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' }
             $script:taskSelectionMessage=''
             try {
@@ -301,6 +331,8 @@ function Initialize-DesktopController {
     })
     $InputBox.Add_TextChanged({
         Update-TaskBindingInput
+        $routing=[bool]((Get-Variable -Name noWakePhase -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakePhase -eq 'routing')
+        if ((Test-NoWakeModeActive) -and -not $routing -and -not $script:consumingLocalCommand) { Suspend-NoWakeConversation 'draft' }
         if ((Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue) -and $script:shortFollowUp -and $script:shortFollowUp.Phase -ne 'recognizing') {
             $expected=($script:shortFollowUp.Phase -eq 'dispatching' -and $script:autoDispatch -and $script:autoDispatch.Text -ceq $InputBox.Text.Trim())
             if (-not $expected -and ($InputBox.Text.Trim() -or $script:shortFollowUp.Phase -eq 'dispatching')) {
