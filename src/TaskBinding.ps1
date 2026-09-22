@@ -1,4 +1,10 @@
 ﻿# Shared binding validation and commit. Importing this module has no state effects.
+# A retained creation receipt is not necessarily an active operation. All
+# consumers share this predicate; unknown/unavailable records remain blocking.
+function Test-VoiceTaskCreatePending {
+    return [bool]($script:voiceTaskCreate -and $script:voiceTaskCreate.Phase -notin @('bound','rejected','not_found'))
+}
+
 function Get-TaskBindingBlockReason {
     param([switch]$IgnoreDraft)
     if ($script:closing) { return '程序正在退出，暂不连接任务。' }

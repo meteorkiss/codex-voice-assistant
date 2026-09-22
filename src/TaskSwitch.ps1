@@ -7,6 +7,26 @@ function Set-VoiceTaskSwitchNotice([string]$Message, [bool]$Speak=$false, [int]$
     if ($Speak) { Queue-AnswerSpeech $Message }
 }
 
+function Get-VoiceTaskConfirmationInstruction {
+    if ($script:noWakeMode -eq 'context') {
+        return '提示朗读结束后直接说“是的”或“不是”，也可以在设置里选择。'
+    }
+    return '请再次唤醒后说“是的”或“不是”，也可以在设置里选择。'
+}
+
+function Get-VoiceTaskCandidateDisambiguator($Candidate) {
+    $leaf=''
+    try {
+        if ($Candidate.cwd -is [string] -and $Candidate.cwd.Trim()) { $leaf=Split-Path -Path $Candidate.cwd.Trim() -Leaf }
+    } catch { $leaf='' }
+    $leaf=[regex]::Replace([string]$leaf,'[\x00-\x1f，。]',' ').Trim()
+    if ($leaf.Length -gt 30) { $leaf=$leaf.Substring(0,30)+'…' }
+    if ($leaf) { return '，工作目录末级是“'+$leaf+'”' }
+    $id=[string]$Candidate.threadId
+    if ($id.Length -gt 8) { $id=$id.Substring($id.Length-8) }
+    return '，任务编号末八位是“'+$id+'”'
+}
+
 function Restore-VoiceTaskCandidates($Pending) {
     if (-not $Pending -or -not $Pending.ContainsKey('OriginalItems') -or -not $TaskCombo) { return }
     $wasSyncing=$script:syncingUi
@@ -54,7 +74,7 @@ function Test-VoiceTaskSwitchContext($Context, [string]$Phase) {
     return [bool]($Context -and $pending -and $pending.Phase -eq $Phase -and
         $Context.Generation -eq $pending.Generation -and $Context.SourceThreadId -ceq $pending.SourceThreadId -and
         $Context.VoiceGeneration -eq $pending.VoiceGeneration -and $Context.Query -ceq $pending.Query -and
-        $Context.TargetThreadId -ceq $pending.TargetThreadId)
+        $Context.TargetThreadId -ceq $pending.TargetThreadId -and $Context.TargetTitle -ceq $pending.TargetTitle)
 }
 
 function Get-VoiceTaskSwitchStaleReason($Pending) {
@@ -99,7 +119,7 @@ function Update-VoiceTaskSwitch([DateTime]$Now=[DateTime]::UtcNow) {
 function Start-VoiceTaskBridge($Request, [string]$Purpose) {
     $pending=$script:voiceTaskSwitch
     $context=@{Generation=$pending.Generation;SourceThreadId=$pending.SourceThreadId;VoiceGeneration=$pending.VoiceGeneration;
-        Query=$pending.Query;TargetThreadId=$pending.TargetThreadId}
+        Query=$pending.Query;TargetThreadId=$pending.TargetThreadId;TargetTitle=$pending.TargetTitle}
     if (-not (Start-Bridge $Request $Purpose)) { throw '连接仍忙，请稍后再试。' }
     $script:bridgeJob.VoiceTaskSwitchContext=$context
 }
@@ -116,6 +136,7 @@ function Begin-VoiceTaskSwitch([string]$Query, [switch]$RequireConfirmation) {
     Invalidate-VoiceTaskCreateBinding -Reason '已要求切换到已有任务' -ReleaseSendBlock
     $script:voiceTaskSwitch=@{Generation=$script:voiceTaskSwitchGeneration;SourceThreadId=[string]$script:threadId;
         VoiceGeneration=$script:voiceGeneration;Query=$queryText;Candidates=@();Phase='searching';TargetThreadId='';RequireConfirmation=[bool]$RequireConfirmation;
+        TargetTitle='';
         ExpiresAt=[DateTime]::UtcNow.AddSeconds(30);InputSnapshot=if($InputBox){[string]$InputBox.Text}else{''}}
     try {
         Start-VoiceTaskBridge @{action='find';query=$queryText} 'voice-find'
@@ -128,6 +149,7 @@ function Start-VoiceTaskBind($Candidate) {
     $pending=$script:voiceTaskSwitch
     $pending.Phase='binding'
     $pending.TargetThreadId=[string]$Candidate.threadId
+    $pending.TargetTitle=[string]$Candidate.title
     $pending.VoiceGeneration=$script:voiceGeneration
     $pending.InputSnapshot=if($InputBox){[string]$InputBox.Text}else{''}
     $pending.ExpiresAt=[DateTime]::UtcNow.AddSeconds(30)
@@ -161,18 +183,27 @@ function Complete-VoiceTaskSearch {
         Set-VoiceTaskSwitchNotice ('没有找到与“'+[string]$pending.Query+'”匹配的任务，未切换。'+$missingHint+'请重说任务名称，或在设置里选择。') $true
         return $true
     }
+    $totalMatches=$candidates.Count
+    $totalMetadataValid=$true
+    try {
+        if ($null -ne $Result.totalMatches) {
+            $reportedTotal=[int]$Result.totalMatches
+            if ($reportedTotal -lt $candidates.Count) { $totalMetadataValid=$false } else { $totalMatches=$reportedTotal }
+        }
+    } catch { $totalMetadataValid=$false }
     $needsConfirmation=($pending.RequireConfirmation -or $Result.requiresConfirmation -or $Result.matchMethod -in @('known_alias','phonetic','approximate_keywords'))
-    if ($Result.matchType -eq 'unique' -and $candidates.Count -eq 1 -and -not $needsConfirmation) {
+    if ($totalMetadataValid -and $totalMatches -eq 1 -and $Result.matchType -eq 'unique' -and $candidates.Count -eq 1 -and -not $needsConfirmation) {
         $pending.Candidates=$candidates
         Start-VoiceTaskBind $candidates[0]
         return $true
     }
-    $validChoice=(($Result.matchType -eq 'ambiguous' -and $candidates.Count -ge 2 -and $candidates.Count -le 5) -or
-        ($Result.matchType -eq 'unique' -and $candidates.Count -eq 1 -and $needsConfirmation))
+    $validChoice=$totalMetadataValid -and (($Result.matchType -eq 'ambiguous' -and $candidates.Count -ge 2 -and $candidates.Count -le 5 -and $totalMatches -ge $candidates.Count) -or
+        ($Result.matchType -eq 'unique' -and $candidates.Count -eq 1 -and $totalMatches -eq 1 -and $needsConfirmation))
     if (-not $validChoice) {
         [void](Fail-VoiceTaskSwitch '任务匹配结果不完整，请重试。'); return $false
     }
-    $pending.Phase='choosing'; $pending.Candidates=$candidates; $pending.ExpiresAt=[DateTime]::UtcNow.AddSeconds(90)
+    $pending.Phase='choosing'; $pending.Candidates=$candidates; $pending.TotalMatches=$totalMatches
+    $pending.CandidatesTruncated=($totalMatches -gt $candidates.Count); $pending.ExpiresAt=[DateTime]::UtcNow.AddSeconds(90)
     if ($TaskCombo) {
         $pending.OriginalItems=@($TaskCombo.Items)
         $pending.OriginalSelection=$TaskCombo.SelectedItem
@@ -188,19 +219,26 @@ function Complete-VoiceTaskSearch {
     if ($desktop) { Set-DesktopSettingsPage $desktop 0; Show-DesktopSettings $desktop }
     if ($candidates.Count -eq 1) {
         $missingHint=if($Result.missingTitleCount -gt 0){'部分任务名称为空，候选可能不全。'}else{''}
-        Set-VoiceTaskSwitchNotice ($missingHint+'你是要切到“'+[string]$candidates[0].title+'”吗？请唤醒后说“是的”或“不是”，也可以在设置里选择。') $true 90
+        Set-VoiceTaskSwitchNotice ($missingHint+'你是要切到“'+[string]$candidates[0].title+'”吗？'+(Get-VoiceTaskConfirmationInstruction)) $true 90
         return $true
     }
     $parts=New-Object 'Collections.Generic.List[string]'
-    [void]$parts.Add($(if($needsConfirmation){'找到几个相近的任务，尚未切换。'}else{'找到多个任务。'}))
+    if ($pending.CandidatesTruncated) {
+        [void]$parts.Add(('共找到'+$totalMatches+'个匹配任务，以下只列前'+$candidates.Count+'个，尚未切换。'))
+    } else {
+        [void]$parts.Add($(if($needsConfirmation){'找到几个相近的任务，尚未切换。'}else{'找到多个任务。'}))
+    }
     $numbers=@('第一个','第二个','第三个','第四个','第五个')
     for ($i=0;$i -lt $candidates.Count;$i++) {
         $title=[string]$candidates[$i].title
         if (-not $title) { $title='未命名任务' }
-        $piece=if($title.Length -gt 40){$numbers[$i]+'，标题开头是：'+$title.Substring(0,40)+'。'}else{$numbers[$i]+'，'+$title+'。'}
+        $sameTitle=@($candidates | Where-Object { [string]$_.title -ceq [string]$candidates[$i].title }).Count -gt 1
+        $hint=if($sameTitle){Get-VoiceTaskCandidateDisambiguator $candidates[$i]}else{''}
+        $piece=if($title.Length -gt 40){$numbers[$i]+'，标题开头是：'+$title.Substring(0,40)+$hint+'。'}else{$numbers[$i]+'，'+$title+$hint+'。'}
         [void]$parts.Add($piece)
     }
-    [void]$parts.Add('请说选择第几个，或者取消切换。')
+    if ($pending.CandidatesTruncated) { [void]$parts.Add('请继续缩小任务关键词，或在设置里查看完整列表；也可以选择上面第几个，或者取消切换。') }
+    else { [void]$parts.Add('请说选择第几个，或者取消切换。') }
     Set-VoiceTaskSwitchNotice ($parts -join '') $true 90
     return $true
 }
@@ -234,6 +272,9 @@ function Complete-VoiceTaskBind {
     if ($reason) { [void](Fail-VoiceTaskSwitch $reason); return $false }
     if (-not (Test-TaskBindingResult $Result $pending.TargetThreadId)) {
         [void](Fail-VoiceTaskSwitch '目标任务暂时无法读取，保留原任务。'); return $false
+    }
+    if ($Result.title -isnot [string] -or -not [string]::Equals(([string]$Result.title).Trim(),([string]$pending.TargetTitle).Trim(),[StringComparison]::Ordinal)) {
+        [void](Fail-VoiceTaskSwitch '目标任务的显示名称已改变，已保留原任务。请重新说任务名称并再次确认。'); return $false
     }
     $targetId=$pending.TargetThreadId
     Reset-VoiceTaskSwitch

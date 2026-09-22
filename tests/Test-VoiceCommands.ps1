@@ -164,6 +164,12 @@ foreach($noun in @('任务','对话','聊天','聊天内容')) {
 }
 Assert-Routed "把任务切到6.17`n打开设置"
 if ((Get-AssistantTaskVoiceCommand '把任务切到这个申办0.6.17。').Value -cne '申办0.6.17') { throw 'Explicit object-first request must be handled before the bare-title fallback.' }; $checks++
+foreach($entry in @(
+ @('换到声伴0.6.18任务。','声伴0.6.18'),
+ @('切换任务到0.6.18。','0.6.18'),
+ @('声伴，帮我换到免唤醒任务。','免唤醒'),
+ @('切到高斯泼溅这个对话。','高斯泼溅')
+)) { Assert-Command $entry[0] 'switchTask' $entry[1] }
 foreach($text in @(
  '不要切到6.17','别切刀声伴6.17','帮我不要切到声伴 6.17',
  '切到6.17吗','切到声伴 6.17？','怎么切到6.17','能否切到6.17',
@@ -194,6 +200,7 @@ foreach($text in @(
 )) { Assert-Routed $text }
 # The broad title fallback runs last, so existing setting targets keep priority.
 Assert-Command '帮我切换到台湾女声' 'voice' 'zh-TW-HsiaoChenNeural'
+Assert-Command '帮我换到台湾女声' 'voice' 'zh-TW-HsiaoChenNeural'
 Assert-Command '切换到普通话女声晓晓' 'voice' 'zh-CN-XiaoxiaoNeural'
 Assert-Command '切换到台湾女声任务' 'switchTask' '台湾女声'
 if ($null -ne (Get-AssistantTaskVoiceCommand '切到语音助手MVP')) { throw 'Bare title intercepted before settings could parse.' }; $checks++
@@ -353,6 +360,9 @@ foreach($text in @('你好帅喂，切换到申办0.6.18免唤醒架构实现。
 }
 foreach($text in @('喂喂，切到0.6.18任务。','切到0.6.18任务，快点。')) {
     if(-not (Test-UnresolvedTaskSwitchIntent $text)){throw ('Missing local guard: '+$text)};$checks++
+}
+foreach($text in @('你好小班帮我换到0.6.18任务。','你好小班帮我切换任务到0.6.18。')) {
+    if(-not (Test-UnresolvedTaskSwitchIntent $text)){throw ('Missing no-comma greeting guard: '+$text)};$checks++
 }
 foreach($text in @('不要切道0.6.18任务。','你好别，切到0.6.18任务。','你好，切到0.6.18任务吗？','比如切到0.6.18任务。','他说，切到0.6.18任务。','我刚才说切道0.6.18任务失败了','“切道0.6.18任务”','如何切道0.6.18任务','解释切道0.6.18任务。')) {
     Assert-Routed $text

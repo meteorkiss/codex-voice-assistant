@@ -85,6 +85,7 @@ function Reset-SpokenSwitchCase {
     $script:localCommandCount=0;$script:localCommandMessage='';$script:localCommandNoticeUntil=[DateTime]::MinValue
     $script:voiceTaskSwitchGeneration=0;$script:boundDirectory='C:\synthetic-project'
     $script:tasksLoaded=$true;$script:taskCandidates=@();$script:taskCreatePhase='';$script:selectionShown=0
+    $script:noWakeMode='off'
     $script:fixtureTargetTitle='声伴 v0.6.17 · 短时连续接话'
     $script:settingsWarning='';$script:workerWarning='';$script:recoveryDraftError=''
     $script:voiceTaskCreateSession='synthetic-session';$script:voiceTaskCreatePath=Join-Path $fixtureRoot 'synthetic-create.json'
@@ -176,6 +177,27 @@ try {
         Assert-That ($sends.Count -eq 1 -and $sends[0].threadId -ceq $targetId) 'Following speech used the old destination.'
         Complete-FakeSend;Tick-And-AssertHealthy
     }
+    Run-Case 'Natural object-between and conversational suffix forms stay local' {
+        $script:fixtureTargetTitle='声伴 v0.6.18 · 免唤醒架构与实现'
+        Speak-SyntheticUtterance '切换任务到0.6.18。'
+        $match=Complete-PureMatcher
+        Assert-That ($match.query -ceq '0.6.18' -and $script:bridgeJob.Purpose -eq 'voice-bind') 'Object-between switch syntax did not start the validated local bind.'
+        Complete-TargetRead
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Trailing this-dialogue marker is not kept in the title query' {
+        $script:fixtureTargetTitle='高斯泼溅'
+        Speak-SyntheticUtterance '切到高斯泼溅这个对话。'
+        $match=Complete-PureMatcher
+        Assert-That ($match.query -ceq '高斯泼溅' -and $script:bridgeJob.Purpose -eq 'voice-bind') 'Conversational suffix leaked into the title query.'
+        Complete-TargetRead
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Corrupted no-comma greeting is clarified locally instead of discarding its prefix' {
+        Speak-SyntheticUtterance '你好小班帮我换到0.6.18任务。'
+        Assert-That ($script:lastLocalCommand -eq 'clarifyTaskSwitch' -and -not $InputBox.Text -and -not $script:voiceTaskSwitch) 'No-comma corrupted greeting was sent or executed.'
+        Assert-NoOrdinarySend
+    }
     Run-Case 'Recovered greeting must confirm even a literal unique version' {
         $script:fixtureTargetTitle='声伴 v0.6.18 · 免唤醒架构与实现'
         Speak-SyntheticUtterance '你好喂，切到0.6.18任务。'
@@ -241,6 +263,38 @@ try {
         $match=Complete-PureMatcher -Ambiguous
         Assert-That ($match.matchType -eq 'ambiguous' -and $script:threadId -ceq $sourceId -and $script:voiceTaskSwitch.Phase -eq 'choosing') 'Ambiguous versions selected a destination.'
         Assert-That ($script:selectionShown -eq 1 -and $TaskCombo.Items.Count -eq 2 -and @($script:bridgeRequests | Where-Object {$_.action -eq 'read'}).Count -eq 0) 'Ambiguous lookup did not present choices or performed premature validation.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'More than five matches reports the full count and safely distinguishes duplicate titles' {
+        Speak-SyntheticUtterance '把任务切到6.17。'
+        $items=@(
+            [pscustomobject]@{threadId=$targetId;title='声伴 v0.6.17';cwd='C:\projects\alpha'},
+            [pscustomobject]@{threadId=$thirdId;title='声伴 v0.6.17';cwd='C:\projects\beta'},
+            [pscustomobject]@{threadId='44444444-4444-4444-8444-444444444444';title='声伴 v0.6.17 · 三';cwd='C:\projects\three'},
+            [pscustomobject]@{threadId='55555555-5555-4555-8555-555555555555';title='声伴 v0.6.17 · 四';cwd='C:\projects\four'},
+            [pscustomobject]@{threadId='66666666-6666-4666-8666-666666666666';title='声伴 v0.6.17 · 五';cwd='C:\projects\five'}
+        )
+        Complete-SyntheticJob ([pscustomobject]@{ok=$true;query='6.17';matchType='ambiguous';matchMethod='contains';totalMatches=7;threads=$items})
+        Assert-That ($script:voiceTaskSwitch.Phase -eq 'choosing' -and $script:voiceTaskSwitch.CandidatesTruncated -and $script:voiceTaskSwitch.TotalMatches -eq 7) 'Truncated result metadata was not retained.'
+        Assert-That ($script:localCommandMessage.Contains('共找到7个') -and $script:localCommandMessage.Contains('只列前5个') -and $script:localCommandMessage.Contains('缩小任务关键词')) 'Truncated choices were presented as though complete.'
+        Assert-That ($script:localCommandMessage.Contains('alpha') -and $script:localCommandMessage.Contains('beta') -and -not $script:localCommandMessage.Contains('C:\projects')) 'Duplicate titles lacked a safe directory-leaf distinction or exposed a full path.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'A same-ID rename during live validation preserves the old target and requires reconfirmation' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        [void](Complete-PureMatcher)
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '是的。'
+        Assert-That ($script:bridgeJob.Purpose -eq 'voice-bind') 'Confirmed candidate did not start live validation.'
+        Complete-SyntheticJob ([pscustomobject]@{ok=$true;threadId=$targetId;title='已改名的任务';cwd='C:\synthetic-target';rolloutPath=$targetPath;status='idle';archived=$false;bindingState='active';hostId='local'})
+        Assert-That ($script:threadId -ceq $sourceId -and -not $script:voiceTaskSwitch -and $script:localCommandMessage.Contains('显示名称已改变') -and $script:localCommandMessage.Contains('再次确认')) 'Same-ID rename silently bound the changed display identity.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Context experiment asks for a direct reply only after its prompt finishes' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        $script:noWakeMode='context'
+        [void](Complete-PureMatcher)
+        Assert-That ($script:voiceTaskSwitch.Phase -eq 'choosing' -and $script:localCommandMessage.Contains('朗读结束后直接说') -and -not $script:localCommandMessage.Contains('唤醒后')) 'Context mode gave a wake-only confirmation instruction.'
         Assert-NoOrdinarySend
     }
     Run-Case 'New input invalidates a late search response and preserves the new draft' {

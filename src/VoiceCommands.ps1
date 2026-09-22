@@ -43,7 +43,7 @@ function Get-AssistantVoiceCommand {
     if (-not $candidate) { return $null }
 
     $action = $null; $value = $null
-    $voiceVerb = '(?:换(?:成|为)?|切换(?:成|为|到)?|改(?:成|为)|用)(?:一个|个)?'
+    $voiceVerb = '(?:换(?:成|为|到)?|切换(?:成|为|到)?|改(?:成|为)|用)(?:一个|个)?'
     if ($candidate -match ('\A' + $voiceVerb + '(?:台湾(?:的)?(?:女声|女生)(?:的声音)?(?:晓臻)?|(?:女声|女生)(?:台湾(?:女声|女生))?|(?:台湾)?(?:女声)?晓臻)\z')) {
         $action = 'voice'; $value = 'zh-TW-HsiaoChenNeural'
     } elseif ($candidate -match ('\A' + $voiceVerb + '(?:(?:台湾)?(?:女声)?晓雨)\z')) {
@@ -172,7 +172,9 @@ function Get-AssistantTaskVoiceCommand {
     if ($candidate -in @('取消任务切换','取消切换')) { return [pscustomobject]@{Action='cancelTaskSwitch';Value=$true} }
     if ($candidate -ceq '连接刚才的新任务') { return [pscustomobject]@{Action='resumeCreatedTask';Value=$true} }
     if ($candidate -ceq '放弃连接新任务') { return [pscustomobject]@{Action='cancelCreatedTaskConnection';Value=$true} }
-    $switchVerb='(?:切换到|切换刀|切换道|切到|切刀|切道)'
+    $switchVerb='(?:切换[到刀道]|切[到刀道]|换到)'
+    # Object-between forms are equivalent to the existing object-first form.
+    $candidate=[regex]::Replace($candidate,'\A(?:切换|切|换)\s*(任务|对话|聊天(?:内容)?)\s*[到刀道]\s*','把$1切到')
     # A locative task suffix belongs to the command, not the searched name.
     # Require an explicit switch verb and a concrete target before removing it.
     if ($candidate -match ('\A(?:把\s*(?:任务|对话|聊天(?:内容)?)\s*)?'+$switchVerb)) {
@@ -198,6 +200,9 @@ function Get-AssistantTaskVoiceCommand {
     }
     if (-not $switch.Success) { return $null }
     $query=$switch.Groups['query'].Value.Trim()
+    # Only explicit demonstratives/separators mark a conversational suffix;
+    # keep actual names ending in 对话/聊天 intact (for example 语音对话).
+    $query=[regex]::Replace($query,'(?:\s+|的这个|这个|那个|的)(?:任务|对话|聊天(?:内容)?)\z','').Trim()
     if ($frontedTask) {
         # A single colloquial demonstrative addresses the following concrete
         # name. Never turn "this/that task" alone into a guessed identity.
@@ -208,7 +213,7 @@ function Get-AssistantTaskVoiceCommand {
         $query=[regex]::Replace($query,'(?:\s+|的这个|这个|的)(?:任务|对话|聊天(?:内容)?)\z','').Trim()
         if ($query -match '\A(?:(?:这|那|这个|那个|当前|之前|上一个|下一个)?(?:任务|对话|聊天(?:内容)?))\z') { return $null }
     }
-    if (-not $query -or $query -match '\A(?:任务|这|那|这个|那个|当前|之前|上一个|下一个)\z') { return $null }
+    if (-not $query -or $query -match '\A(?:任务|这|那|这个|那个|当前|之前|刚才|刚才那个|刚才的|上一个|下一个)\z') { return $null }
     # Without the task noun there is no explicit end marker. Keep apparent
     # extra instructions and unresolved references out of this lookup route.
     if (($bareTitle -or $frontedTask) -and $query -match '(?:帮我|给我|替我|请|之前|之后|以后|刚才那个|刚才的|那个任务|这个任务)') { return $null }
@@ -223,6 +228,12 @@ function Test-UnresolvedTaskSwitchIntent([string]$Text) {
     if ([string]::IsNullOrWhiteSpace($Text) -or $Text.Length -gt 120) { return $false }
     if ($Text -match '[?？:：;；“”‘’「」『』《》"`''\r\n\x00-\x1f]' -or
         $Text -match '(?:不|别|如果|假设|比如|例如|只是|他说|我说|刚才|解释|怎么|如何|为什么|什么意思|[吗么呢][。.!！\s]*$)') { return $false }
-    return [bool]($Text -match '\A\s*(?:[\p{IsCJKUnifiedIdeographs}]{1,6}[，,]\s*)?(?:(?:请|麻烦你?|帮我|给我)\s*)?(?:把\s*(?:任务|对话|聊天)\s*)?切(?:换)?[到刀道]\s*.+' -and
+    $imperative='(?:切换|切|换)(?:(?:任务|对话|聊天)\s*)?[到刀道]\s*.+'
+    $ordinary=[bool]($Text -match ('\A\s*(?:[\p{IsCJKUnifiedIdeographs}]{1,6}[，,]\s*)?(?:(?:请|麻烦你?|帮我|给我)\s*)?(?:把\s*(?:任务|对话|聊天)\s*)?'+$imperative))
+    # A corrupted short greeting without punctuation is clarification-only.
+    # It must still contain a politeness marker and an explicit task/version
+    # target, so arbitrary preceding prose is never discarded or executed.
+    $shortGreeting=[bool]($Text -match ('\A\s*你好[\p{IsCJKUnifiedIdeographs}]{0,4}(?:请|麻烦你?|帮我|给我)(?:把\s*(?:任务|对话|聊天)\s*)?'+$imperative))
+    return [bool](($ordinary -or $shortGreeting) -and
         $Text -match '(?:任务|对话|[0-9０-９]\s*[.．]\s*[0-9０-９])')
 }

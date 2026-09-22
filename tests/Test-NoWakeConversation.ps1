@@ -48,9 +48,32 @@ Assert-NoWakeConversation ((Get-NoWakeBlockReason) -eq 'external-capture') 'Exte
 $script:mic.Sessions=@()
 Assert-NoWakeConversation (-not (Get-NoWakeBlockReason)) 'Safe synthetic state stayed blocked.'
 
+# Retained creation receipts use the production shared predicate. Completed
+# terminal states must not disable no-wake forever; uncertain records remain
+# fail-closed and are never deleted to make the test pass.
+foreach($state in @(
+    @{phase=$null;blocked=$false},@{phase='bound';blocked=$false},@{phase='rejected';blocked=$false},
+    @{phase='not_found';blocked=$false},@{phase='unknown';blocked=$true},@{phase='unavailable';blocked=$true}
+)) {
+    $script:voiceTaskCreate=if($null -eq $state.phase){$null}else{@{Phase=$state.phase;SendBlocked=($state.phase -in @('unknown','unavailable'))}}
+    $reason=Get-NoWakeBlockReason
+    Assert-NoWakeConversation (($reason -eq 'target-change') -eq $state.blocked) ('Creation phase '+[string]$state.phase+' produced the wrong no-wake ownership decision.')
+}
+$script:voiceTaskCreate=@{Phase='bound';SendBlocked=$false}
+$boundSnapshot=Get-NoWakeContextSnapshot '选择第二个'
+$boundDecision=Get-NoWakeDecision -Text '选择第二个' -Mode context -Context $boundSnapshot
+$handled=Invoke-NoWakeContextDecision '选择第二个' $boundDecision $boundSnapshot
+Assert-NoWakeConversation ($handled -and $script:routed -eq 2) 'A retained bound creation receipt blocked the production contextual route.'
+$script:voiceTaskCreate=@{Phase='unknown';SendBlocked=$true}
+$unknownSnapshot=Get-NoWakeContextSnapshot '选择第二个'
+$unknownDecision=Get-NoWakeDecision -Text '选择第二个' -Mode context -Context $unknownSnapshot
+$handled=Invoke-NoWakeContextDecision '选择第二个' $unknownDecision $unknownSnapshot
+Assert-NoWakeConversation (-not $handled -and $script:routed -eq 2) 'An unknown creation receipt was allowed to route.'
+$script:voiceTaskCreate=$null
+
 $script:pendingSends=@{'thread-a'=[pscustomobject]@{Text='queued'}}
 $handled=Invoke-NoWakeContextDecision '选择第二个' $decision (Get-NoWakeContextSnapshot '选择第二个')
-Assert-NoWakeConversation (-not $handled -and $script:routed -eq 1) 'A pending send did not block contextual execution.'
+Assert-NoWakeConversation (-not $handled -and $script:routed -eq 2) 'A pending send did not block contextual execution.'
 $script:pendingSends=@{}
 
 $staleSegment=[pscustomobject]@{Generation=($script:noWakeGeneration-1);Pcm=[byte[]](1,2);StartedAt=[DateTime]::UtcNow;EndedAt=[DateTime]::UtcNow;Reason='silence'}

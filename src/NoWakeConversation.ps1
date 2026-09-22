@@ -1,5 +1,7 @@
 ﻿. (Join-Path $PSScriptRoot 'NoWakeDecision.ps1')
 
+. (Join-Path $PSScriptRoot 'TaskBinding.ps1')
+
 $script:noWakeMode='off'
 $script:noWakePhase='off'
 $script:noWakeCapture=$null
@@ -49,7 +51,7 @@ function Get-NoWakeBlockReason {
     if ($script:pendingUncertain -or ($script:pendingSends -and $script:pendingSends.ContainsKey($script:threadId))) { return 'pending-send' }
     if ($InputBox.Text.Trim()) { return 'draft' }
     if (-not $script:connected -or $script:bindingAvailability -in @('archived','missing','unknown') -or $script:bindingReadError) { return 'binding' }
-    if ($script:manualTaskBinding -or $script:voiceTaskCreate) { return 'target-change' }
+    if ($script:manualTaskBinding -or (Test-VoiceTaskCreatePending)) { return 'target-change' }
     if ($script:ttsJob -or $script:speechQueue.Count -gt 0 -or [CodexReader.AudioPlayer]::State -in @('playing','paused')) { return 'playback' }
     if (Test-NoWakeExternalCapture) { return 'external-capture' }
     return ''
@@ -162,7 +164,7 @@ function Invoke-NoWakeContextDecision([string]$Text,$Decision,$Snapshot) {
     if ($script:noWakeMode -ne 'context' -or $Decision.Route -ne 'context-confirmation' -or
         -not (Test-NoWakeContextStillCurrent $Snapshot) -or $Decision.ContextId -cne $Snapshot.ContextId -or
         $script:closing -or $script:recMode -ne 'idle' -or $script:bridgeJob -or $script:pendingUncertain -or
-        ($script:pendingSends -and $script:pendingSends.ContainsKey($script:threadId)) -or $script:manualTaskBinding -or $script:voiceTaskCreate -or
+        ($script:pendingSends -and $script:pendingSends.ContainsKey($script:threadId)) -or $script:manualTaskBinding -or (Test-VoiceTaskCreatePending) -or
         $InputBox.Text.Trim() -or $script:bindingAvailability -in @('archived','missing','unknown') -or $script:bindingReadError) { return $false }
     if (-not (Stop-NoWakeCapture)) { return $false }
     $script:noWakePhase='routing'

@@ -132,7 +132,7 @@ try {
         Assert-That ($script:localCommandCount -eq 1 -and $script:bridgeJob.Purpose -eq 'voice-find') 'Recovery ASR did not reach local task lookup.'
         Assert-That ($script:bridgeRequests.Count -eq 1 -and $script:bridgeRequests[0].action -eq 'find' -and $script:bridgeRequests[0].query -ceq '声伴 6.17') 'Recovery forwarded a command or changed its keyword.'
         $findContext=$script:bridgeJob.VoiceTaskSwitchContext;$script:bridgeJob=$null
-        [void](Complete-VoiceTaskSearch ([pscustomobject]@{ok=$true;query='声伴 6.17';matchType='unique';threads=@([pscustomobject]@{threadId=$targetId;title='新任务'})}) $findContext)
+        [void](Complete-VoiceTaskSearch ([pscustomobject]@{ok=$true;query='声伴 6.17';matchType='unique';threads=@([pscustomobject]@{threadId=$targetId;title='新任务 · 合成数据'})}) $findContext)
         $bindContext=$script:bridgeJob.VoiceTaskSwitchContext;$script:bridgeJob=$null
         Assert-That (Complete-VoiceTaskBind (Target-Result) $bindContext) 'Validated recovery target did not bind.'
         Assert-That ($script:connected -and $script:threadId -ceq $targetId -and $script:bindingAvailability -eq 'active' -and -not $InputBox.Text) 'Binding restored old text or kept the archived target.'

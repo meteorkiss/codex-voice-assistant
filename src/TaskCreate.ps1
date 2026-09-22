@@ -14,9 +14,6 @@ function Set-VoiceTaskCreateNotice([string]$Message,[bool]$Speak=$false) {
     $script:localCommandNoticeUntil=[DateTime]::UtcNow.AddSeconds(12)
     if ($Speak -and -not $script:closing) { Queue-AnswerSpeech $Message }
 }
-function Test-VoiceTaskCreatePending {
-    return [bool]($script:voiceTaskCreate -and $script:voiceTaskCreate.Phase -notin @('bound','rejected','not_found'))
-}
 function Test-VoiceTaskCreateBlocksSend {
     return [bool]((Test-VoiceTaskCreatePending) -and $script:voiceTaskCreate.SendBlocked)
 }
