@@ -431,10 +431,14 @@ def list_tasks(cwd=None):
         if task_id in titles:
             row['title'] = titles[task_id]
     unsynced = sum(row['titleSource'] != 'session_index' for row in rows)
+    missing_titles = sum(not isinstance(row['title'], str) or not row['title'].strip() for row in rows)
+    warning = ('部分对话名称尚未同步，暂显示本地记录名；请在 Codex 核对后刷新。' if unsynced else '')
+    if missing_titles:
+        warning = (f'有 {missing_titles} 个任务的名称为空，无法按名称搜索；请先在 Codex 设置任务名称后刷新。' + warning)
     return {'threads': rows, 'activeThreadDetection': 'explicit_binding',
             'source': 'local_index', 'indexFile': index.name,
             'titleIndexAvailable': title_index_available, 'unsyncedTitleCount': unsynced,
-            'warning': '部分对话名称尚未同步，暂显示本地记录名；请在 Codex 核对后刷新。' if unsynced else '',
+            'missingTitleCount': missing_titles, 'warning': warning,
             'connectionState': 'not_checked', 'requiresValidation': True}
 
 
@@ -609,6 +613,11 @@ def handle(request):
             listing = list_tasks()
             result = match_tasks(request['query'], listing['threads'])
             result['warning'] = listing.get('warning', '')
+            result['missingTitleCount'] = listing.get('missingTitleCount', 0)
+            # Incomplete names can hide another same-version candidate. A
+            # unique visible match is not sufficient for automatic binding.
+            if result['missingTitleCount'] and result['matchType'] == 'unique':
+                result['requiresConfirmation'] = True
             return result
         except TaskMatchError as exc:
             raise BridgeError(exc.code, str(exc)) from exc

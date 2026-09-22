@@ -707,6 +707,31 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT title FROM threads').fetchone()[0], row['title'])
         db.close()
 
+    def test_empty_task_names_are_diagnosed_and_prevent_false_unique_auto_bind(self):
+        with self.index() as db:
+            unnamed = self.add_task(db, title='')
+            named = self.add_task(db, title='声伴 v0.6.18 · 语音切换修复')
+        db.close()
+        with patch.object(bridge, 'discover_pipe') as discover, patch.object(bridge, 'app_tool') as call:
+            out = bridge.handle({'action': 'find', 'query': '0.6.18'})
+            self.assertEqual(out['threads'][0]['threadId'], named['id'])
+            self.assertTrue(out['requiresConfirmation'])
+            self.assertEqual(out['missingTitleCount'], 1)
+            self.assertIn('名称为空', out['warning'])
+            missing = bridge.handle({'action': 'find', 'query': '免唤醒架构实现'})
+            self.assertEqual(missing['matchType'], 'none')
+            self.assertEqual(missing['missingTitleCount'], 1)
+            # Restoring the actual title restores discoverability without
+            # changing the task ID, archive boundary or guessing from content.
+            (self.root / 'session_index.jsonl').write_text(self.title_record(
+                unnamed['id'], '声伴 v0.6.18 · 免唤醒架构与实现'), encoding='utf-8')
+            fixed = bridge.handle({'action': 'find', 'query': '申办0.6.18免唤醒架构实现'})
+            self.assertEqual(fixed['threads'][0]['threadId'], unnamed['id'])
+            self.assertEqual(fixed['missingTitleCount'], 0)
+            self.assertTrue(fixed['requiresConfirmation'])
+        discover.assert_not_called()
+        call.assert_not_called()
+
     def test_title_updates_are_latest_utc_then_last_complete_record(self):
         task_id = str(uuid.uuid4())
         index = self.root / 'session_index.jsonl'

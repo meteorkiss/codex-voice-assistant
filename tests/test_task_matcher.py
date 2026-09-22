@@ -216,6 +216,39 @@ class TitleMatchingTests(unittest.TestCase):
             out = matcher.match_tasks('声伴 6.17', [expected])
         self.assertEqual(out['threads'], [expected])
 
+    def test_combined_reported_alias_and_omitted_conjunction(self):
+        expected = task('声伴 v0.6.18 · 免唤醒架构与实现')
+        rows = [task('声伴 v0.6.18 · 语音切换修复'), expected,
+                task('声伴 v0.6.180 · 免唤醒架构与实现')]
+        for query in ('申办0.6.18免唤醒架构实现', '生办V0.6.18免唤醒架构实现',
+                      '声伴 6.18 免唤醒架构实现'):
+            with self.subTest(query=query):
+                out = matcher.match_tasks(query, rows)
+                self.assertEqual(out['threads'], [expected])
+                self.assertTrue(out['requiresConfirmation'])
+                self.assertEqual(out['query'], query)
+
+    def test_omitted_conjunction_is_bounded_not_arbitrary_word_dropping(self):
+        for query, title in (('免唤醒架构实现', '免唤醒架构不实现'),
+                             ('免唤醒架构实现', '免唤醒架构待实现'),
+                             ('架构实现', '架构与和实现'), ('甲乙丙丁', '甲与乙丙丁'),
+                             ('甲乙丙丁', '甲乙丙与丁'), ('架构与实现', '架构实现'),
+                             ('生办0.6.18架构实现', '声伴 v0.6.180 · 架构与实现'),
+                             ('生办0.6.18架构实现', '无声伴奏 v0.6.18 · 架构与实现'),
+                             ('生办0.6.18架构实现不存在', '声伴 v0.6.18 · 架构与实现')):
+            with self.subTest(query=query, title=title):
+                self.assertEqual(matcher.match_tasks(query, [task(title)])['matchType'], 'none')
+
+    def test_new_alias_keeps_literal_priority_and_version_ambiguity(self):
+        literal = task('生办 V0.6.18')
+        rows = [task('声伴 v0.6.18 · 免唤醒架构与实现'), task('声伴 v0.6.18 · 语音切换修复')]
+        out = matcher.match_tasks('生办V0.6.18', rows)
+        self.assertEqual(out['matchType'], 'ambiguous')
+        self.assertEqual(out['threads'], rows)
+        self.assertTrue(out['requiresConfirmation'])
+        self.assertEqual(matcher.match_tasks('生办V0.6.18', rows + [literal])['threads'], [literal])
+        self.assertEqual(matcher.match_tasks('生办', rows)['matchType'], 'none')
+
     def test_observed_product_alias_requires_version_and_preserves_original_query_and_title(self):
         expected = task('声伴 v0.6.17 · 短时连续接话')
         for query in ('申办0.6.17', '申办 6.17', '6.17 申办', '申办 ｖ０．６．１７'):

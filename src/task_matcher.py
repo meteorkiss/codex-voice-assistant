@@ -17,7 +17,7 @@ MAX_QUERY_LENGTH = 200
 MAX_CANDIDATES = 5
 MIN_PHONETIC_HAN = 3
 VERSION_TOKEN = re.compile(r'v[0-9]+(?:\.[0-9]+)*|[0-9]+(?:\.[0-9]+)+')
-VERSIONED_PRODUCT_ALIASES = {'申办': '声伴'}
+VERSIONED_PRODUCT_ALIASES = {'申办': '声伴', '生办': '声伴'}
 
 
 class TaskMatchError(ValueError):
@@ -132,6 +132,19 @@ def script_terms(text):
     return re.findall(r'[a-z0-9+#.]+|[^a-z0-9+#.]+', text)
 
 
+def matches_omitted_conjunction(word, title_words):
+    """Allow one title-side 与/和 gap between literal Han spans of >=2 chars.
+
+    No query character, negation, content word or version is discarded. This
+    only recalls confirmation candidates, never changes exact normalization.
+    """
+    if len(word) < 4 or not all(is_han(char) for char in word):
+        return False
+    return any(word[:split] + conjunction + word[split:] in title_word
+               for split in range(2, len(word) - 1)
+               for conjunction in ('与', '和') for title_word in title_words)
+
+
 def approximate_keywords(terms, title, title_versions):
     """Conservative local candidate recall; every keyword must be explained.
 
@@ -149,6 +162,8 @@ def approximate_keywords(terms, title, title_versions):
             scores.append(1.0)
         elif word in normalized:
             scores.append(1.0)
+        elif matches_omitted_conjunction(word, title_words):
+            scores.append(0.85)
         elif re.fullmatch(r'[a-z]{4,}', word):
             options = [SequenceMatcher(None, word, other, autojunk=False).ratio()
                        for other in title_words if re.fullmatch(r'[a-z]{4,}', other)
@@ -174,7 +189,7 @@ def keywords_match(terms, title, title_versions):
 
 
 def known_alias_terms(terms):
-    """One observed ASR product alias, only with an explicit version token.
+    """Observed ASR product aliases, only with an explicit version token.
 
     Both product names must remain whole keyword terms: never replace part of
     a longer name, remove another keyword, or correct any version digit.
@@ -238,6 +253,13 @@ def match_tasks(query, threads):
         ranked = []
         for order, (thread, _, title_versions) in enumerate(titled):
             score = approximate_keywords(terms, thread['title'], title_versions)
+            if score is None:
+                alias_terms, products = known_alias_terms(terms)
+                if alias_terms and all((product, False) in keyword_terms(thread['title'])
+                                       for product in products):
+                    score = approximate_keywords(alias_terms, thread['title'], title_versions)
+                    if score is not None:
+                        score -= 0.05
             if score is not None:
                 ranked.append((-score, order, thread))
         matches = [thread for _, _, thread in sorted(ranked, key=lambda item: item[:2])]

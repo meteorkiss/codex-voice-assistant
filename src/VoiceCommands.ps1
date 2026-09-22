@@ -146,6 +146,16 @@ function Get-AssistantTaskVoiceCommand {
     # the query keeps the user's exact characters and spacing for display.
     $sentenceCheck=[regex]::Replace($candidate,'(?<=[0-9０-９])\s*[.．]\s*(?=[0-9０-９])','')
     if ($sentenceCheck -match '[。.!！．]') { return $null }
+    # Recover a short ASR-corrupted greeting only before a complete switch
+    # command. Never discard negation/questions or arbitrary preceding prose.
+    $greeting=[regex]::Match($candidate,'\A你好[\p{IsCJKUnifiedIdeographs}]{0,4}[，,]\s*(?<command>(?:切换[到刀道]|切[到刀道]|把\s*(?:任务|对话|聊天)).+)\z')
+    if ($greeting.Success -and $candidate -notmatch '\A你好声伴[，,]' -and $candidate -notmatch '(?:不|别|没|吗|么|呢|如何|怎么|如果|假设|只是|例如|比如)') {
+        $recovered=Get-AssistantTaskVoiceCommand $greeting.Groups['command'].Value -AllowBareTitle:$AllowBareTitle
+        if ($recovered -and $recovered.Action -eq 'switchTask') {
+            $recovered | Add-Member -NotePropertyName RequiresConfirmation -NotePropertyValue $true
+            return $recovered
+        }
+    }
     $prefix='\A(?:(?:你好[\s，,]*)?声伴(?:[\s，,]*你好)?[\s，,]*)?(?:(?:请|麻烦)(?:你)?[\s，,]*|劳驾[\s，,]*)?(?:(?:你)?(?:帮我|给我|替我)\s*)?(?:直接\s*)?'
     $candidate=[regex]::Replace($candidate,$prefix,'')
     $candidate=[regex]::Replace($candidate,'(?:\s*一下)?(?:\s*吧)?(?:\s*[，,]?\s*谢谢)?\z','').Trim()
@@ -162,7 +172,7 @@ function Get-AssistantTaskVoiceCommand {
     if ($candidate -in @('取消任务切换','取消切换')) { return [pscustomobject]@{Action='cancelTaskSwitch';Value=$true} }
     if ($candidate -ceq '连接刚才的新任务') { return [pscustomobject]@{Action='resumeCreatedTask';Value=$true} }
     if ($candidate -ceq '放弃连接新任务') { return [pscustomobject]@{Action='cancelCreatedTaskConnection';Value=$true} }
-    $switchVerb='(?:切换到|切换刀|切到|切刀)'
+    $switchVerb='(?:切换到|切换刀|切换道|切到|切刀|切道)'
     # A locative task suffix belongs to the command, not the searched name.
     # Require an explicit switch verb and a concrete target before removing it.
     if ($candidate -match ('\A(?:把\s*(?:任务|对话|聊天(?:内容)?)\s*)?'+$switchVerb)) {
@@ -204,4 +214,15 @@ function Get-AssistantTaskVoiceCommand {
     if (($bareTitle -or $frontedTask) -and $query -match '(?:帮我|给我|替我|请|之前|之后|以后|刚才那个|刚才的|那个任务|这个任务)') { return $null }
     if ($query -notmatch '\A[\p{L}\p{N}\p{M}\s_\-－.．·]+\z') { return $null }
     return [pscustomobject]@{Action='switchTask';Value=$query}
+}
+
+function Test-UnresolvedTaskSwitchIntent([string]$Text) {
+    # This is a non-executing safety net, not another permissive command parser.
+    # A short, imperative-looking request with a target stays local on parse
+    # failure; descriptions, quoted examples, negatives and questions stay chat.
+    if ([string]::IsNullOrWhiteSpace($Text) -or $Text.Length -gt 120) { return $false }
+    if ($Text -match '[?？:：;；“”‘’「」『』《》"`''\r\n\x00-\x1f]' -or
+        $Text -match '(?:不|别|如果|假设|比如|例如|只是|他说|我说|刚才|解释|怎么|如何|为什么|什么意思|[吗么呢][。.!！\s]*$)') { return $false }
+    return [bool]($Text -match '\A\s*(?:[\p{IsCJKUnifiedIdeographs}]{1,6}[，,]\s*)?(?:(?:请|麻烦你?|帮我|给我)\s*)?(?:把\s*(?:任务|对话|聊天)\s*)?切(?:换)?[到刀道]\s*.+' -and
+        $Text -match '(?:任务|对话|[0-9０-９]\s*[.．]\s*[0-9０-９])')
 }

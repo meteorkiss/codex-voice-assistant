@@ -15,6 +15,14 @@ function Try-LocalAssistantCommand([string]$Text) {
         $command=Get-AssistantTaskSelectionReply $Text ($script:voiceTaskSwitch.Candidates.Count -eq 1)
     }
     if (-not $command) { $command=Get-AssistantVoiceCommand $Text }
+    if (-not $command -and (Test-UnresolvedTaskSwitchIntent $Text)) {
+        Reset-VoiceTaskSwitch
+        Complete-LocalCommandInput $Text ([string]$InputBox.Text) $script:autoDispatch
+        $script:localCommandCount++
+        $script:lastLocalCommand='clarifyTaskSwitch'
+        Set-VoiceTaskSwitchNotice '听到的是切换任务口令，但没有识别完整。未发送到聊天，也没有切换；请重说“切到”加任务关键词，或在设置里选择。' $true
+        return $true
+    }
     if (-not $command) {
         # A new ordinary utterance changes the subject. A later generic "yes"
         # must not still confirm the previous task suggestion.
@@ -73,7 +81,7 @@ function Try-LocalAssistantCommand([string]$Text) {
                 }
                 'resumeCreatedTask' { $handled=[bool](Resume-VoiceTaskCreateConnection) }
                 'cancelCreatedTaskConnection' { $handled=[bool](Cancel-VoiceTaskCreateConnection) }
-                'switchTask' { $handled=[bool](Begin-VoiceTaskSwitch -Query ([string]$command.Value)) }
+                'switchTask' { $handled=[bool](Begin-VoiceTaskSwitch -Query ([string]$command.Value) -RequireConfirmation:([bool]$command.RequiresConfirmation)) }
                 'chooseTask' { $handled=[bool](Select-VoiceTaskCandidate -Index ([int]$command.Value)) }
                 'cancelTaskSwitch' { $handled=[bool](Cancel-VoiceTaskSwitch) }
             } }

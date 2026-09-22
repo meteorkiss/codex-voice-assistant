@@ -151,6 +151,48 @@ function Finish-SyntheticFeedback {
     throw 'Synthetic local feedback did not drain.'
 }
 try {
+    Run-Case 'Reported 0.6.18 cut homophone stays local and confirms product alias' {
+        $script:fixtureTargetTitle='声伴 v0.6.18 · 免唤醒架构与实现'
+        Speak-SyntheticUtterance '切道生办V0.6.18任务。'
+        $match=Complete-PureMatcher
+        Assert-That ($match.requiresConfirmation -and $match.query -ceq '生办V0.6.18' -and $script:voiceTaskSwitch.Phase -eq 'choosing' -and $script:threadId -ceq $sourceId) 'Reported homophones failed local matching or bound without confirmation.'
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '是的。'
+        Complete-TargetRead
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Reported corrupted greeting plus alias and omitted conjunction resolves together' {
+        $script:fixtureTargetTitle='声伴 v0.6.18 · 免唤醒架构与实现'
+        Speak-SyntheticUtterance '你好帅喂，切换到申办0.6.18免唤醒架构实现。'
+        $match=Complete-PureMatcher
+        Assert-That ($match.requiresConfirmation -and $match.query -ceq '申办0.6.18免唤醒架构实现' -and $script:voiceTaskSwitch.Phase -eq 'choosing' -and $script:threadId -ceq $sourceId) 'Combined ASR deviations failed recall or changed binding early.'
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '是的。'
+        Complete-TargetRead
+        Assert-NoOrdinarySend
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '这是目标切换后的合成普通消息。'
+        $sends=@($script:bridgeRequests | Where-Object {$_.action -eq 'send'})
+        Assert-That ($sends.Count -eq 1 -and $sends[0].threadId -ceq $targetId) 'Following speech used the old destination.'
+        Complete-FakeSend;Tick-And-AssertHealthy
+    }
+    Run-Case 'Recovered greeting must confirm even a literal unique version' {
+        $script:fixtureTargetTitle='声伴 v0.6.18 · 免唤醒架构与实现'
+        Speak-SyntheticUtterance '你好喂，切到0.6.18任务。'
+        $match=Complete-PureMatcher
+        Assert-That (-not $match.requiresConfirmation -and $script:voiceTaskSwitch.Phase -eq 'choosing' -and -not $script:bridgeJob) 'Greeting uncertainty was lost after literal matching.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Unparsed imperative stays local without blocking the next wake with a draft' {
+        Speak-SyntheticUtterance '喂喂，切换到0.6.18任务。'
+        Assert-That ($script:lastLocalCommand -eq 'clarifyTaskSwitch' -and -not $InputBox.Text -and -not $script:voiceTaskSwitch -and $script:threadId -ceq $sourceId) 'Unresolved command did not settle safely.'
+        Assert-NoOrdinarySend
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '切到6.17。'
+        [void](Complete-PureMatcher)
+        Complete-TargetRead
+        Assert-NoOrdinarySend
+    }
     Run-Case 'Reported product alias utterance stays local and binds only after target read' {
         Speak-SyntheticUtterance '把任务切到这个申办0.6.17。'
         Assert-That ($script:localCommandCount -eq 1 -and $script:bridgeRequests[0].query -ceq '申办0.6.17' -and -not $InputBox.Text) 'Reported object-first command was not consumed with its exact query.'
@@ -160,6 +202,18 @@ try {
         Finish-SyntheticFeedback
         Speak-SyntheticUtterance '是的。'
         Complete-TargetRead
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Unnamed targets prevent a false unique binding and explain missing recall' {
+        Speak-SyntheticUtterance '切到6.17。'
+        Complete-SyntheticJob ([pscustomobject]@{ok=$true;query='6.17';matchType='unique';matchMethod='contains';requiresConfirmation=$true;missingTitleCount=1;threads=@([pscustomobject]@{threadId=$targetId;title=$script:fixtureTargetTitle})})
+        Assert-That ($script:voiceTaskSwitch.Phase -eq 'choosing' -and -not $script:bridgeJob -and $script:localCommandMessage.Contains('名称为空')) 'Incomplete task names silently auto-bound the visible candidate.'
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '不是。'
+        Finish-SyntheticFeedback
+        Speak-SyntheticUtterance '切到免唤醒架构任务。'
+        Complete-SyntheticJob ([pscustomobject]@{ok=$true;query='免唤醒架构';matchType='none';missingTitleCount=1;threads=@()})
+        Assert-That ($script:threadId -ceq $sourceId -and $script:localCommandMessage.Contains('名称为空') -and -not $InputBox.Text) 'No-match result hid missing names or blocked the next wake.'
         Assert-NoOrdinarySend
     }
     Run-Case 'Reported 6.117 remains unmatched and is explained locally without version guessing' {

@@ -346,4 +346,16 @@ if ($sourceBytes.Length -lt 3 -or $sourceBytes[0] -ne 239 -or $sourceBytes[1] -n
 $tokens=$null;$parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($sourcePath,[ref]$tokens,[ref]$parseErrors)
 if($parseErrors.Count){throw $parseErrors[0].Message};$checks++
+foreach($verb in @('切道','切换道','切刀','切换刀')) { Assert-Command ($verb+'生办V0.6.18任务。') 'switchTask' '生办V0.6.18' }
+foreach($text in @('你好帅喂，切换到申办0.6.18免唤醒架构实现。','你好喂，切到0.6.18任务。')) {
+    $actual=Get-AssistantVoiceCommand $text
+    if(-not $actual -or $actual.Action -ne 'switchTask' -or -not $actual.RequiresConfirmation){throw ('Missing greeting confirmation: '+$text)};$checks++
+}
+foreach($text in @('喂喂，切到0.6.18任务。','切到0.6.18任务，快点。')) {
+    if(-not (Test-UnresolvedTaskSwitchIntent $text)){throw ('Missing local guard: '+$text)};$checks++
+}
+foreach($text in @('不要切道0.6.18任务。','你好别，切到0.6.18任务。','你好，切到0.6.18任务吗？','比如切到0.6.18任务。','他说，切到0.6.18任务。','我刚才说切道0.6.18任务失败了','“切道0.6.18任务”','如何切道0.6.18任务','解释切道0.6.18任务。')) {
+    Assert-Routed $text
+    if(Test-UnresolvedTaskSwitchIntent $text){throw ('Unsafe local guard: '+$text)};$checks++
+}
 Write-Output ('PASS '+$checks+' voice command checks; matched commands and ordinary routing protected.')

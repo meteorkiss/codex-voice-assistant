@@ -6,6 +6,30 @@ on:
 permissions:
   contents: read
 jobs:
+  spoken-task-switch:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare pure title matching dependency
+        shell: powershell
+        run: |
+          python -m pip install pypinyin==0.55.0
+          if ($LASTEXITCODE -ne 0) { throw 'Matching dependency install failed.' }
+      - name: Check parser, names, matching and synthetic spoken binding
+        shell: powershell
+        run: |
+          python -B -m unittest discover -s tests -p test_task_matcher.py
+          if ($LASTEXITCODE -ne 0) { throw 'Title matching failed.' }
+          python -B -m unittest discover -s tests -p test_bridge.py
+          if ($LASTEXITCODE -ne 0) { throw 'Bridge checks failed.' }
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/Test-VoiceCommands.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Command parser failed.' }
+          $pythonPath = (Get-Command python.exe).Source
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/Test-SpokenTaskSwitch.ps1 -PythonPath $pythonPath
+          if ($LASTEXITCODE -ne 0) { throw 'Spoken task binding failed.' }
   offline:
     runs-on: windows-2022
     timeout-minutes: 15
