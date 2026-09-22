@@ -2,9 +2,9 @@
 
 更新：2026-09-22。以下命令从项目根目录执行，使用 Windows PowerShell 5.1；WPF 测试带 `-STA`。测试样本在 `tests/fixtures`，运行产物写入 `work/tests` 或 `work/desktop-shell-render`。不应使用个人 `data` 作为测试输出目录。
 
-2026-09-22 程序候审稳定性修补：`Test-VoiceCommands.ps1` 1576、`Test-NoWakeConversation.ps1` 23、`Test-SpokenTaskSwitch.ps1` 24 场景/728、`Test-TaskCreate.ps1` 12 场景/115、`Test-BindingRecovery.ps1` 15/88、`Test-HandsFree.ps1` 840、`Test-TaskAutoConnect.ps1` 25/215、`Test-PlaybackCancellation.ps1` 344、免唤醒决策/采集/设置 14/11/11、`test_task_matcher.py` 53、`test_bridge.py` 63、基础设施 96、启动设置 12 场景、源码依赖 49 均通过。新增覆盖创建记录 null/bound/rejected/not_found/unknown/unavailable 六态、自然切换句、无逗号误识别澄清、同 ID 改名、超过五项截断、重名安全区分和 context 提示。全部为合成状态/WPF/桥接/音频替身；未运行旧 `Test-TaskSwitch`、`Test-TaskSwitchIntegration`、`Test-LocalCommands` 或 Git-export suite。
+2026-09-22 独立审核修补后的新鲜结果：`Test-VoiceCommands.ps1` 1576、`Test-NoWakeConversation.ps1` 33、`Test-SpokenTaskSwitch.ps1` 32 场景/885、`Test-TaskCreate.ps1` 13 场景/122、`Test-BindingRecovery.ps1` 15/88、`Test-HandsFree.ps1` 840、`Test-TaskAutoConnect.ps1` 25/215、`Test-PlaybackCancellation.ps1` 344、免唤醒决策/采集/设置 14/11/11、`test_task_matcher.py` 53、`test_bridge.py` 63、基础设施 96、启动设置 12 场景、源码依赖 49 均通过。新增覆盖：放弃连接只释放当前任务语音所有权、未决创建账本仍禁止重派；长标题截断、同目录末级和短 ID 碰撞仍可区分；context 提示按实际通道降级。全部为合成状态/WPF/桥接/音频替身；未运行旧 `Test-TaskSwitch`、`Test-TaskSwitchIntegration`、`Test-LocalCommands` 或 Git-export suite。源码布局第一次误写为不存在的 `tests/Test-SourceLayout.ps1`，当场失败后改用实际 `tools/Test-SourceLayout.ps1` 通过，未把错误命令记作通过。
 
-本轮 `work/tests` 清理被策略拒绝，未重试或换壳绕过；候审时仍有 22 个忽略文件、20,265 字节，位于 `bridge`、`startup-settings`、`task-create`，不进入 Git。原 `04fe` 工作树的受保护 27 文件未操作。
+本轮 `work/tests` 清理被策略拒绝，未重试或换壳绕过。审核追加的 `micguard-owners/result.json` 与 `wake-recovery/result.json` 也被拒绝清理；随后必要的 `Test-TaskCreate.ps1` 失败先行/修复回归又生成四组隔离 GUID 目录，同样不删除。最终只读盘点为 108 个忽略文件、98,970 字节，位于 `micguard-owners`、`startup-settings`、`task-create`、`wake-recovery`，不进入 Git；精确清单见 `docs/目录与生成物盘点-0.6.18.md`。原 `04fe` 工作树的受保护 27 文件/568,340 字节未操作。
 
 免唤醒 0.6.18：新增 `Test-NoWakeDecision.ps1` 14 项、`Test-NoWakeCapture.ps1` 11 项、`Test-NoWakeConversation.ps1` 11 项、`Test-NoWakeSettings.ps1` 11 项，以及带 `-PythonPath/-ModelDir` 的 `Test-NoWakePipeline.ps1` 本地模型管线。普通话语在 observe/context 均无执行路由，只有当前未过期候选确认可调用一次既有本地路由。相关免手 837、归档恢复 88、自动连接 215、语音切换 380、基础设施 91、启动设置 12 场景和源码依赖 49 项通过。全部使用合成 PCM/录音、状态和桥接替身或仓库合成语音夹具；没有真人麦克风、真实消息、任务管理或网络。新 GUID 目录逐文件清理，未触碰原 27 个受阻历史文件，未重试被拒旧组合命令。
 

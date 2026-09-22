@@ -8,23 +8,64 @@ function Set-VoiceTaskSwitchNotice([string]$Message, [bool]$Speak=$false, [int]$
 }
 
 function Get-VoiceTaskConfirmationInstruction {
-    if ($script:noWakeMode -eq 'context') {
+    $mode=if((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue)){[string]$script:noWakeMode}else{'off'}
+    if ($mode -eq 'off') {
+        return '请再次唤醒后说“是的”或“不是”，也可以在设置里选择。'
+    }
+    if ($mode -eq 'observe') {
+        return '当前“仅试判”不会执行确认；请在设置里选择，或先关闭免唤醒实验后再唤醒回答。'
+    }
+    $reason='unavailable'
+    try { $reason=[string](Get-NoWakeBlockReason -IgnoreVoiceFindBridge) } catch { $reason='unavailable' }
+    if (-not $reason -or $reason -eq 'playback') {
         return '提示朗读结束后直接说“是的”或“不是”，也可以在设置里选择。'
     }
-    return '请再次唤醒后说“是的”或“不是”，也可以在设置里选择。'
+    $detail=switch ($reason) {
+        'create-pending' { '新建请求仍待核对' }
+        'binding' { '当前任务状态不可安全确认' }
+        'pending-send' { '上次发送结果仍待核对' }
+        'draft' { '需要先处理未发送草稿' }
+        'manual-recording' { '当前录音尚未结束' }
+        'external-capture' { '其他应用正在使用麦克风' }
+        'target-change' { '任务连接正在改变' }
+        'closing' { '程序正在退出' }
+        default { '当前确认通道尚不可用' }
+    }
+    return '当前免唤醒确认因'+$detail+'而暂停；请在设置里选择，或先关闭免唤醒实验后再唤醒回答。'
 }
 
-function Get-VoiceTaskCandidateDisambiguator($Candidate) {
+function Get-VoiceTaskCandidateDirectoryLeaf($Candidate) {
     $leaf=''
     try {
         if ($Candidate.cwd -is [string] -and $Candidate.cwd.Trim()) { $leaf=Split-Path -Path $Candidate.cwd.Trim() -Leaf }
     } catch { $leaf='' }
     $leaf=[regex]::Replace([string]$leaf,'[\x00-\x1f，。]',' ').Trim()
     if ($leaf.Length -gt 30) { $leaf=$leaf.Substring(0,30)+'…' }
-    if ($leaf) { return '，工作目录末级是“'+$leaf+'”' }
+    return $leaf
+}
+
+function Get-VoiceTaskCandidateDisambiguator($Candidate,$Peers) {
+    $peers=@($Peers)
+    $leaf=Get-VoiceTaskCandidateDirectoryLeaf $Candidate
+    if ($leaf) {
+        $sameLeaf=@($peers | Where-Object { (Get-VoiceTaskCandidateDirectoryLeaf $_) -ceq $leaf }).Count
+        if ($sameLeaf -eq 1) { return '，工作目录末级是“'+$leaf+'”' }
+    }
     $id=[string]$Candidate.threadId
-    if ($id.Length -gt 8) { $id=$id.Substring($id.Length-8) }
-    return '，任务编号末八位是“'+$id+'”'
+    for ($length=[Math]::Min(8,$id.Length);$length -le $id.Length;$length++) {
+        $suffix=if($length){$id.Substring($id.Length-$length)}else{''}
+        $sameSuffix=@($peers | Where-Object {
+            $peerId=[string]$_.threadId
+            $peerLength=[Math]::Min($length,$peerId.Length)
+            $peerSuffix=if($peerLength){$peerId.Substring($peerId.Length-$peerLength)}else{''}
+            $peerSuffix -ceq $suffix
+        }).Count
+        if ($sameSuffix -eq 1) {
+            $label=if($length -eq 8){'八'}else{[string]$length}
+            return '，任务编号末'+$label+'位是“'+$suffix+'”'
+        }
+    }
+    return '，任务编号是“'+$id+'”'
 }
 
 function Restore-VoiceTaskCandidates($Pending) {
@@ -229,11 +270,24 @@ function Complete-VoiceTaskSearch {
         [void]$parts.Add($(if($needsConfirmation){'找到几个相近的任务，尚未切换。'}else{'找到多个任务。'}))
     }
     $numbers=@('第一个','第二个','第三个','第四个','第五个')
+    $spokenTitles=New-Object 'Collections.Generic.List[string]'
+    foreach ($candidate in $candidates) {
+        $spokenTitle=[string]$candidate.title
+        if (-not $spokenTitle) { $spokenTitle='未命名任务' }
+        if ($spokenTitle.Length -gt 40) { $spokenTitle=$spokenTitle.Substring(0,40) }
+        [void]$spokenTitles.Add($spokenTitle)
+    }
     for ($i=0;$i -lt $candidates.Count;$i++) {
         $title=[string]$candidates[$i].title
         if (-not $title) { $title='未命名任务' }
-        $sameTitle=@($candidates | Where-Object { [string]$_.title -ceq [string]$candidates[$i].title }).Count -gt 1
-        $hint=if($sameTitle){Get-VoiceTaskCandidateDisambiguator $candidates[$i]}else{''}
+        $sameSpokenTitle=@($spokenTitles | Where-Object { $_ -ceq $spokenTitles[$i] }).Count -gt 1
+        $conflictingPeers=if($sameSpokenTitle){@($candidates | Where-Object {
+            $peerTitle=[string]$_.title
+            if(-not $peerTitle){$peerTitle='未命名任务'}
+            if($peerTitle.Length -gt 40){$peerTitle=$peerTitle.Substring(0,40)}
+            $peerTitle -ceq $spokenTitles[$i]
+        })}else{@()}
+        $hint=if($sameSpokenTitle){Get-VoiceTaskCandidateDisambiguator $candidates[$i] $conflictingPeers}else{''}
         $piece=if($title.Length -gt 40){$numbers[$i]+'，标题开头是：'+$title.Substring(0,40)+$hint+'。'}else{$numbers[$i]+'，'+$title+$hint+'。'}
         [void]$parts.Add($piece)
     }

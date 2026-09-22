@@ -99,6 +99,15 @@ Case 'Explicit abandon never kills create; ready then permits a genuinely new re
     Assert ($script:voiceTaskCreate.RequestId -ne $first -and @($script:requests|Where-Object{$_.Purpose -eq 'voice-create'}).Count -eq 2) 'New command reused/replayed the old request.'
     Assert (Test-Path -LiteralPath (Join-Path $stateDir ('voice-task-create-history\'+$first+'.json'))) 'Prior created ID was not retained in history.'
 }
+Case 'Abandoned unresolved creation releases the current destination but never permits duplicate create' {
+    $ctx=Begin-Create
+    Assert (Cancel-VoiceTaskCreateConnection) 'Explicit abandon was not handled.'
+    $script:bridgeJob=$null
+    Assert (Complete-VoiceTaskCreate (Receipt 'unknown') $ctx) 'Late unknown creation receipt was not retained.'
+    Assert ($script:voiceTaskCreate.ConnectionAbandoned -and -not $script:voiceTaskCreate.SendBlocked -and (Test-VoiceTaskCreatePending)) 'Abandoned unresolved creation lost its released-send or recoverable-ledger semantics.'
+    Assert (Begin-VoiceTaskCreate 'must-not-repeat') 'Duplicate create command was not consumed locally.'
+    Assert (@($script:requests|Where-Object{$_.Purpose -eq 'voice-create'}).Count -eq 1) 'Abandoned unresolved creation was dispatched a second time.'
+}
 Case 'Unknown and client IDs are never read as real tasks and polling is bounded' {
     $ctx=Begin-Create;Assert (Complete-VoiceTaskCreate (Receipt 'pending') $ctx) 'Pending receipt failed.'
     Assert ($script:voiceTaskCreate.ClientThreadId -eq 'temporary-client-id' -and -not $script:voiceTaskCreate.ThreadId -and $script:requests.Count -eq 1) 'Temporary ID was treated as a real task.'

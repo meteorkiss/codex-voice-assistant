@@ -280,6 +280,40 @@ try {
         Assert-That ($script:localCommandMessage.Contains('alpha') -and $script:localCommandMessage.Contains('beta') -and -not $script:localCommandMessage.Contains('C:\projects')) 'Duplicate titles lacked a safe directory-leaf distinction or exposed a full path.'
         Assert-NoOrdinarySend
     }
+    Run-Case 'Different long titles with the same spoken prefix use distinct directory leaves' {
+        Speak-SyntheticUtterance '把任务切到6.17。'
+        $prefix=('同'*40)
+        $items=@(
+            [pscustomobject]@{threadId=$targetId;title=$prefix+'甲';cwd='C:\projects\alpha'},
+            [pscustomobject]@{threadId=$thirdId;title=$prefix+'乙';cwd='C:\projects\beta'}
+        )
+        Complete-SyntheticJob ([pscustomobject]@{ok=$true;query='6.17';matchType='ambiguous';matchMethod='contains';totalMatches=2;threads=$items})
+        Assert-That ($script:localCommandMessage.Contains('alpha') -and $script:localCommandMessage.Contains('beta')) 'Truncated spoken labels collided without directory-leaf disambiguation.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Colliding long labels and directory leaves fall back to distinct task IDs' {
+        Speak-SyntheticUtterance '把任务切到6.17。'
+        $prefix=('同'*40)
+        $items=@(
+            [pscustomobject]@{threadId='11111111-1111-4111-8111-aaaaaaaaaaaa';title=$prefix+'甲';cwd='C:\one\shared'},
+            [pscustomobject]@{threadId='22222222-2222-4222-8222-aaaaaaaaaaaa';title=$prefix+'乙';cwd='D:\two\shared'}
+        )
+        Complete-SyntheticJob ([pscustomobject]@{ok=$true;query='6.17';matchType='ambiguous';matchMethod='contains';totalMatches=2;threads=$items})
+        Assert-That ($script:localCommandMessage.Contains('任务编号末') -and -not $script:localCommandMessage.Contains('末八位') -and $script:localCommandMessage.Contains('1-aaaaaaaaaaaa') -and $script:localCommandMessage.Contains('2-aaaaaaaaaaaa')) 'Same-leaf candidates did not expand beyond a colliding eight-character ID suffix.'
+        Assert-That (-not $script:localCommandMessage.Contains('C:\one') -and -not $script:localCommandMessage.Contains('D:\two')) 'Candidate disambiguation exposed a full path.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Missing candidate directories still receive distinct safe identifiers' {
+        Speak-SyntheticUtterance '把任务切到6.17。'
+        $prefix=('同'*40)
+        $items=@(
+            [pscustomobject]@{threadId='77777777-7777-4777-8777-111111111111';title=$prefix+'甲'},
+            [pscustomobject]@{threadId='88888888-8888-4888-8888-222222222222';title=$prefix+'乙'}
+        )
+        Complete-SyntheticJob ([pscustomobject]@{ok=$true;query='6.17';matchType='ambiguous';matchMethod='contains';totalMatches=2;threads=$items})
+        Assert-That ($script:localCommandMessage.Contains('11111111') -and $script:localCommandMessage.Contains('22222222')) 'Candidates without directories were not distinguishable by safe IDs.'
+        Assert-NoOrdinarySend
+    }
     Run-Case 'A same-ID rename during live validation preserves the old target and requires reconfirmation' {
         Speak-SyntheticUtterance '把任务切到申办6.17。'
         [void](Complete-PureMatcher)
@@ -295,6 +329,52 @@ try {
         $script:noWakeMode='context'
         [void](Complete-PureMatcher)
         Assert-That ($script:voiceTaskSwitch.Phase -eq 'choosing' -and $script:localCommandMessage.Contains('朗读结束后直接说') -and -not $script:localCommandMessage.Contains('唤醒后')) 'Context mode gave a wake-only confirmation instruction.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Context prompt exposes a real fallback while creation status is unknown' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        $script:noWakeMode='context'
+        $script:voiceTaskCreate=@{Phase='unknown';CreationState='unknown';SendBlocked=$true;ConnectionAbandoned=$false;AutoBindAllowed=$false}
+        [void](Complete-PureMatcher)
+        Assert-That ($script:localCommandMessage.Contains('新建请求仍待核对') -and $script:localCommandMessage.Contains('设置里选择') -and $script:localCommandMessage.Contains('关闭免唤醒实验后再唤醒') -and -not $script:localCommandMessage.Contains('朗读结束后直接说')) 'Unknown creation promised an unavailable direct confirmation channel.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Context prompt does not promise direct confirmation for an unreadable creation ledger' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        $script:noWakeMode='context'
+        $script:voiceTaskCreate=@{Phase='unavailable';SendBlocked=$true;AutoBindAllowed=$false}
+        [void](Complete-PureMatcher)
+        Assert-That ($script:localCommandMessage.Contains('新建请求仍待核对') -and $script:localCommandMessage.Contains('设置里选择') -and -not $script:localCommandMessage.Contains('朗读结束后直接说')) 'Unreadable creation ledger promised direct confirmation.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Context prompt degrades for archived and unknown binding states' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        $script:noWakeMode='context'
+        $script:bindingAvailability='archived'
+        [void](Complete-PureMatcher)
+        Assert-That ($script:localCommandMessage.Contains('当前任务状态不可安全确认') -and $script:localCommandMessage.Contains('设置里选择') -and -not $script:localCommandMessage.Contains('朗读结束后直接说')) 'Archived binding promised direct confirmation.'
+        $script:bindingAvailability='unknown'
+        $instruction=Get-VoiceTaskConfirmationInstruction
+        Assert-That ($instruction.Contains('当前任务状态不可安全确认') -and $instruction.Contains('关闭免唤醒实验后再唤醒')) 'Unknown binding omitted the real fallback entry.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Context prompt degrades for a pending send and a retained draft' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        $script:noWakeMode='context'
+        [void](Complete-PureMatcher)
+        $script:pendingUncertain='unknown-request'
+        $instruction=Get-VoiceTaskConfirmationInstruction
+        Assert-That ($instruction.Contains('发送结果仍待核对') -and $instruction.Contains('设置里选择') -and -not $instruction.Contains('朗读结束后直接说')) 'Pending send promised direct confirmation.'
+        $script:pendingUncertain='';$InputBox.Text='保留草稿'
+        $instruction=Get-VoiceTaskConfirmationInstruction
+        Assert-That ($instruction.Contains('先处理未发送草稿') -and $instruction.Contains('关闭免唤醒实验后再唤醒')) 'Draft blocker omitted the real fallback entry.'
+        Assert-NoOrdinarySend
+    }
+    Run-Case 'Observe mode never tells the user to use an unavailable ordinary wake channel' {
+        Speak-SyntheticUtterance '把任务切到申办6.17。'
+        $script:noWakeMode='observe'
+        [void](Complete-PureMatcher)
+        Assert-That ($script:localCommandMessage.Contains('仅试判') -and $script:localCommandMessage.Contains('设置里选择') -and $script:localCommandMessage.Contains('关闭免唤醒实验后再唤醒') -and -not $script:localCommandMessage.Contains('请再次唤醒后说')) 'Observe mode advertised an unavailable confirmation route.'
         Assert-NoOrdinarySend
     }
     Run-Case 'New input invalidates a late search response and preserves the new draft' {

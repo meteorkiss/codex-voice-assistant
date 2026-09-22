@@ -1,8 +1,34 @@
 ﻿# Shared binding validation and commit. Importing this module has no state effects.
-# A retained creation receipt is not necessarily an active operation. All
-# consumers share this predicate; unknown/unavailable records remain blocking.
+# A retained creation receipt is not necessarily an active binding operation.
+# This lifecycle predicate stays true for an explicitly abandoned unresolved
+# create so status lookup/resume remains available and duplicate creation stays
+# prohibited.
 function Test-VoiceTaskCreatePending {
     return [bool]($script:voiceTaskCreate -and $script:voiceTaskCreate.Phase -notin @('bound','rejected','not_found'))
+}
+
+# Current-task voice ownership is narrower than creation lifecycle ownership.
+# Explicit abandon can release the current destination without cancelling or
+# forgetting the irreversible create request. Damaged/conflicting state remains
+# fail-closed.
+function Test-VoiceTaskCreateBlocksCurrentVoice {
+    $record=$script:voiceTaskCreate
+    if (-not $record) { return $false }
+    $phase=[string]$record.Phase
+    $creation=[string]$record.CreationState
+    $sendBlocked=($record.SendBlocked -eq $true)
+    $abandoned=($record.ConnectionAbandoned -eq $true)
+    $autoBind=($record.AutoBindAllowed -eq $true)
+    if ($phase -in @('bound','rejected','not_found')) {
+        $expected=switch ($phase) { 'bound' {'ready'} 'rejected' {'rejected'} 'not_found' {'not_found'} }
+        # ConnectionAbandoned may legitimately survive until a late terminal
+        # create receipt arrives; it is history, not renewed ownership.
+        return [bool]($creation -cne $expected -or $sendBlocked -or $autoBind)
+    }
+    if ($abandoned) {
+        return [bool]($sendBlocked -or $autoBind)
+    }
+    return $true
 }
 
 function Get-TaskBindingBlockReason {

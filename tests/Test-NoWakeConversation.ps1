@@ -48,27 +48,43 @@ Assert-NoWakeConversation ((Get-NoWakeBlockReason) -eq 'external-capture') 'Exte
 $script:mic.Sessions=@()
 Assert-NoWakeConversation (-not (Get-NoWakeBlockReason)) 'Safe synthetic state stayed blocked.'
 
-# Retained creation receipts use the production shared predicate. Completed
-# terminal states must not disable no-wake forever; uncertain records remain
-# fail-closed and are never deleted to make the test pass.
+# Creation lifecycle and current-task voice ownership are distinct. A valid
+# explicit abandon releases the current destination even while an unresolved
+# creation receipt remains queryable and duplicate-safe. Inconsistent records
+# remain fail-closed and are never deleted to make the test pass.
 foreach($state in @(
-    @{phase=$null;blocked=$false},@{phase='bound';blocked=$false},@{phase='rejected';blocked=$false},
-    @{phase='not_found';blocked=$false},@{phase='unknown';blocked=$true},@{phase='unavailable';blocked=$true}
+    @{phase=$null;creation=$null;send=$false;abandoned=$false;auto=$false;blocked=$false},
+    @{phase='bound';creation='ready';send=$false;abandoned=$false;auto=$false;blocked=$false},
+    @{phase='rejected';creation='rejected';send=$false;abandoned=$false;auto=$false;blocked=$false},
+    @{phase='rejected';creation='rejected';send=$false;abandoned=$true;auto=$false;blocked=$false},
+    @{phase='not_found';creation='not_found';send=$false;abandoned=$false;auto=$false;blocked=$false},
+    @{phase='abandoned';creation='ready';send=$false;abandoned=$true;auto=$false;blocked=$false},
+    @{phase='unknown';creation='unknown';send=$false;abandoned=$true;auto=$false;blocked=$false},
+    @{phase='creating';creation='dispatching';send=$true;abandoned=$false;auto=$true;blocked=$true},
+    @{phase='checking';creation='pending';send=$true;abandoned=$false;auto=$true;blocked=$true},
+    @{phase='unknown';creation='unknown';send=$true;abandoned=$false;auto=$false;blocked=$true},
+    @{phase='unavailable';creation=$null;send=$true;abandoned=$false;auto=$false;blocked=$true},
+    @{phase='abandoned';creation='ready';send=$true;abandoned=$true;auto=$false;blocked=$true},
+    @{phase='abandoned';creation='ready';send=$false;abandoned=$false;auto=$false;blocked=$true},
+    @{phase='unknown';creation='unknown';send=$false;abandoned=$true;auto=$true;blocked=$true},
+    @{phase='bound';creation='unknown';send=$false;abandoned=$false;auto=$false;blocked=$true}
 )) {
-    $script:voiceTaskCreate=if($null -eq $state.phase){$null}else{@{Phase=$state.phase;SendBlocked=($state.phase -in @('unknown','unavailable'))}}
+    $script:voiceTaskCreate=if($null -eq $state.phase){$null}else{@{Phase=$state.phase;CreationState=$state.creation;SendBlocked=$state.send;ConnectionAbandoned=$state.abandoned;AutoBindAllowed=$state.auto}}
     $reason=Get-NoWakeBlockReason
-    Assert-NoWakeConversation (($reason -eq 'target-change') -eq $state.blocked) ('Creation phase '+[string]$state.phase+' produced the wrong no-wake ownership decision.')
+    Assert-NoWakeConversation (($reason -eq 'create-pending') -eq $state.blocked) ('Creation phase '+[string]$state.phase+' produced the wrong no-wake ownership decision.')
 }
-$script:voiceTaskCreate=@{Phase='bound';SendBlocked=$false}
+$script:voiceTaskCreate=@{Phase='abandoned';CreationState='ready';SendBlocked=$false;ConnectionAbandoned=$true;AutoBindAllowed=$false}
 $boundSnapshot=Get-NoWakeContextSnapshot '选择第二个'
 $boundDecision=Get-NoWakeDecision -Text '选择第二个' -Mode context -Context $boundSnapshot
 $handled=Invoke-NoWakeContextDecision '选择第二个' $boundDecision $boundSnapshot
-Assert-NoWakeConversation ($handled -and $script:routed -eq 2) 'A retained bound creation receipt blocked the production contextual route.'
-$script:voiceTaskCreate=@{Phase='unknown';SendBlocked=$true}
+Assert-NoWakeConversation ($handled -and $script:routed -eq 2 -and (Test-VoiceTaskCreatePending)) 'An explicitly abandoned created-task receipt blocked the current contextual route or lost its recoverable ledger.'
+$script:voiceTaskCreate=@{Phase='unknown';CreationState='unknown';SendBlocked=$true;ConnectionAbandoned=$false;AutoBindAllowed=$false}
 $unknownSnapshot=Get-NoWakeContextSnapshot '选择第二个'
 $unknownDecision=Get-NoWakeDecision -Text '选择第二个' -Mode context -Context $unknownSnapshot
 $handled=Invoke-NoWakeContextDecision '选择第二个' $unknownDecision $unknownSnapshot
 Assert-NoWakeConversation (-not $handled -and $script:routed -eq 2) 'An unknown creation receipt was allowed to route.'
+$script:noWakePhase='observing';Suspend-NoWakeConversation (Get-NoWakeBlockReason)
+Assert-NoWakeConversation ($script:noWakePhase -eq 'paused' -and $script:notice.Contains('新建请求仍待核对')) 'The creation-specific no-wake block reason was not visible.'
 $script:voiceTaskCreate=$null
 
 $script:pendingSends=@{'thread-a'=[pscustomobject]@{Text='queued'}}
