@@ -11,7 +11,20 @@ function Initialize-AssistantSettings {
             if ($null -ne $settings.handsFreeEnabled -and -not $TestMode -and -not $PreviewPath) { $script:handsFreeEnabled=[bool]$settings.handsFreeEnabled }
             if ($null -ne $settings.bargeInEnabled) { $script:bargeInEnabled=[bool]$settings.bargeInEnabled }
             if ($null -ne $settings.shortFollowUpEnabled -and -not $TestMode -and -not $PreviewPath) { $script:shortFollowUpEnabled=[bool]$settings.shortFollowUpEnabled }
-            if ($settings.noWakeMode -in @('off','observe','context') -and -not $TestMode -and -not $PreviewPath) { $script:noWakeMode=[string]$settings.noWakeMode }
+            # 0.7.0 intentionally does not restore the old observe/context
+            # experiments. A continuous conversation always requires a fresh,
+            # visible user start after launch.
+            $script:noWakeMode='off'
+            $script:continuousConversationEnabled=$false
+            if ($settings.modelEndpoint -is [string] -and $settings.modelEndpoint.Length -le 2048) { $script:modelEndpoint=[string]$settings.modelEndpoint }
+            if ($settings.modelName -is [string] -and $settings.modelName.Length -le 200) { $script:modelName=[string]$settings.modelName }
+            if ($settings.modelAuthMode -in @('bearer','none')) { $script:modelAuthMode=[string]$settings.modelAuthMode }
+            if ($settings.modelCredentialEnv -is [string] -and $settings.modelCredentialEnv -cmatch '\A[A-Za-z_][A-Za-z0-9_]{0,127}\z') { $script:modelCredentialEnv=[string]$settings.modelCredentialEnv }
+            if ($null -ne $settings.modelDataConsent) { $script:modelDataConsent=[bool]$settings.modelDataConsent }
+            if ($null -ne $settings.conversationTtsConsent) { $script:conversationTtsConsent=[bool]$settings.conversationTtsConsent }
+            if ($null -ne $settings.conversationIdleSeconds) { $script:conversationIdleSeconds=[Math]::Max(30,[Math]::Min(600,[int]$settings.conversationIdleSeconds)) }
+            if ($null -ne $settings.conversationMaxSeconds) { $script:conversationMaxSeconds=[Math]::Max(60,[Math]::Min(3600,[int]$settings.conversationMaxSeconds)) }
+            if ($null -ne $settings.conversationMaxTurns) { $script:conversationMaxTurns=[Math]::Max(1,[Math]::Min(100,[int]$settings.conversationMaxTurns)) }
             if ($settings.wakePhrase) {
                 $wakeValidation=Get-WakePhraseValidation ([string]$settings.wakePhrase)
                 if ($wakeValidation.Valid) { $script:wakePhrase=$wakeValidation.Phrase }
@@ -30,8 +43,7 @@ function Initialize-AssistantSettings {
 }
 
 function Save-Settings {
-    $savedNoWakeMode=if ((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -in @('off','observe','context')) { $script:noWakeMode } else { 'off' }
-    $preferences=@{version=8;threadId=$script:threadId;voice=$script:voiceId;speechRate=$script:speechRate;autoRead=$script:autoRead;autoSend=$script:autoSend;handsFreeEnabled=$script:handsFreeEnabled;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;noWakeMode=$savedNoWakeMode;wakePhrase=$script:wakePhrase;waveStyle=$script:waveStyle;waveSize=$script:waveSize;pinned=$script:pinned;captionsVisible=$script:captionsVisible;floatingVisible=$script:floatingVisible;directoryFilter=$script:directoryFilter}
+    $preferences=@{version=9;threadId=$script:threadId;voice=$script:voiceId;speechRate=$script:speechRate;autoRead=$script:autoRead;autoSend=$script:autoSend;handsFreeEnabled=$script:handsFreeEnabled;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;noWakeMode='off';continuousConversationEnabled=$false;modelEndpoint=$script:modelEndpoint;modelName=$script:modelName;modelAuthMode=$script:modelAuthMode;modelCredentialEnv=$script:modelCredentialEnv;modelDataConsent=[bool]$script:modelDataConsent;conversationTtsConsent=[bool]$script:conversationTtsConsent;conversationIdleSeconds=[int]$script:conversationIdleSeconds;conversationMaxSeconds=[int]$script:conversationMaxSeconds;conversationMaxTurns=[int]$script:conversationMaxTurns;wakePhrase=$script:wakePhrase;waveStyle=$script:waveStyle;waveSize=$script:waveSize;pinned=$script:pinned;captionsVisible=$script:captionsVisible;floatingVisible=$script:floatingVisible;directoryFilter=$script:directoryFilter}
     if ($window -and -not [double]::IsNaN($window.Left) -and -not [double]::IsNaN($window.Top)) { $preferences.left=$window.Left; $preferences.top=$window.Top }
     Write-AtomicJson -Path $settingsPath -Value $preferences -Depth 4
 }

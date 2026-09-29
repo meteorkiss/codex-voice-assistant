@@ -34,7 +34,7 @@ if (-not $PreviewPath) {
         $mutex.Dispose(); exit
     }
     [IO.File]::WriteAllText((Join-Path $stateDir 'pid.txt'),$PID.ToString())
-    if (-not $TestMode) { Remove-StaleNoWakeFiles $stateDir $runtime }
+    if (-not $TestMode) { Remove-StaleNoWakeFiles $stateDir $runtime; Remove-StaleSecretaryFiles $stateDir $runtime }
 }
 $hasExplicitThreadId = -not [string]::IsNullOrWhiteSpace($ThreadId)
 $script:threadId = if ($hasExplicitThreadId) { $ThreadId } else { '' }
@@ -99,13 +99,25 @@ $script:pendingSends = @{}
 $script:pendingPath = Join-Path $stateDir 'pending-sends.json'
 $script:lastPendingCheck = [DateTime]::MinValue
 $script:speechQueue = New-Object 'System.Collections.Generic.Queue[string]'
+$script:continuousConversationEnabled=$false
+$script:modelEndpoint=''
+$script:modelName=''
+$script:modelAuthMode='bearer'
+$script:modelCredentialEnv=''
+$script:modelDataConsent=$false
+$script:conversationTtsConsent=$false
+$script:conversationIdleSeconds=90
+$script:conversationMaxSeconds=600
+$script:conversationMaxTurns=20
 . (Join-Path $PSScriptRoot 'HandsFree.ps1')
 . (Join-Path $PSScriptRoot 'NoWakeConversation.ps1')
+. (Join-Path $PSScriptRoot 'SecretaryConversation.ps1')
 . (Join-Path $PSScriptRoot 'WakePhrase.ps1')
 Initialize-AssistantSettings
 Initialize-BindingRecovery
 
 function Stop-Output([string]$Message = '', [switch]$PreserveVoiceBookmark) {
+    if ($Message -and (Get-Command Cancel-SecretarySpeech -ErrorAction SilentlyContinue) -and $script:secretaryPhase -eq 'speaking') { Cancel-SecretarySpeech '秘书朗读已停止；连续对话保持暂停。' }
     if ($Message -and (Get-Command Close-ShortFollowUp -ErrorAction SilentlyContinue)) { Close-ShortFollowUp -CancelCapture }
     Stop-AssistantOutput -Message $Message -PreserveVoiceBookmark:$PreserveVoiceBookmark
 }
@@ -165,7 +177,7 @@ function Send-Text([string]$VoiceSource = '') {
     if ($script:recMode -ne 'idle') { return }
     $text = $InputBox.Text.Trim()
     if (-not $text) { $script:notice = '先说一句话，或者在输入框里打字。'; return }
-    if (Try-LocalAssistantCommand $text) { return }
+    if ($VoiceSource -cne 'secretary' -and (Try-LocalAssistantCommand $text)) { return }
     if ($script:bindingAvailability -in @('archived','missing')) {
         if (Save-InputDraftForRecovery '目标不可发送，普通输入未投递') { $script:notice='原任务不可发送，刚才的话已单独保留；请先切换任务。' }
         return
@@ -329,6 +341,7 @@ try {
         try { Stop-Output; if ($StatusLabel) { $StatusLabel.Text=$script:notice }; @{error=$script:errorText;where='dispatcher';time=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runtime 'ui-error.json') -Encoding UTF8 } catch {}
     })
     foreach ($name in $desktop.Controls.Keys) { Set-Variable -Name $name -Value $desktop.Controls[$name] -Scope Script }
+    Initialize-SecretaryConversation
     $script:mic=New-Object CodexReader.Audio.MicGuard
     $script:recorder=New-Object JarvisRecorder
     $script:manualRecorder=$script:recorder
@@ -345,6 +358,7 @@ try {
     })
     $StopButton.Add_Click({
         Reset-ManualTaskBinding '已取消这次连接。'
+        if ($script:continuousConversationEnabled) { Stop-AssistantOutput; Pause-SecretaryConversation '连续对话已立即暂停；已接收或未知的工作不会被撤销或重派。'; return }
         if ($script:shortFollowUp -or $script:followUpCapture) { Stop-ShortFollowUpByUser; return }
         Stop-Output '已停止朗读。'
         if ($script:handsFreePhase -in @('releasing','answering-wake','acknowledging')) { $script:handsFreePhase='waiting'; Suspend-WakeListener }
@@ -432,6 +446,17 @@ try {
             if (-not (Safe-To-Play) -and -not $waitingForWakeRelease -and -not $waitingForEchoStartup -and -not $waitingForWakeRecovery -and ($script:ttsJob -or $script:speechQueue.Count -gt 0 -or [CodexReader.AudioPlayer]::State -in @('playing','paused'))) { Stop-Output }
             Update-HandsFree $now
             if (Get-Command Update-NoWakeConversation -ErrorAction SilentlyContinue) { Update-NoWakeConversation $now }
+            if ($script:modelJob -and $script:modelJob.Process.HasExited) {
+                $job=$script:modelJob;$script:modelJob=$null
+                try { $result=if(Test-Path -LiteralPath $job.Output){Get-Content -LiteralPath $job.Output -Raw -Encoding UTF8|ConvertFrom-Json}else{$null} } catch { $result=$null }
+                Close-Job $job
+                if (-not $result -or $result.ok -ne $true) {
+                    if ($job.SessionId -ceq $script:secretarySessionId -and $job.Generation -eq $script:secretaryGeneration -and $script:continuousConversationEnabled) {
+                        $message=if($result -and $result.error -and $result.error.message){[string]$result.error.message}else{'文本模型没有返回可验证结果；本轮没有执行动作。'}
+                        Set-SecretaryPhase 'error' $message
+                    }
+                } else { [void](Complete-SecretaryModel $result $job.Turn $now) }
+            }
 
             $captureReady=($script:echoQuestionCapture -and (Test-FullDuplexReady)) -or (-not $script:wakeOwnsMicrophone -and -not $script:wakeListener.IsListening -and -not $script:wakeListener.IsStopping)
             if ($script:recMode -eq 'arming' -and $now -ge $script:armDue -and $captureReady) {
@@ -486,6 +511,7 @@ try {
                 if ($purpose -eq 'send' -and $receiptState -in @('accepted','rejected')) { Clear-PendingSend $job.Request.threadId }
                 Sync-PendingSend
                 Close-Job $job
+                if ($purpose -eq 'send' -and $job.SecretaryWorkContext) { [void](Complete-SecretaryWorkReceipt $job $(if($receiptState){$receiptState}else{'unknown'})) }
                 $InputBox.IsReadOnly=($script:recMode -ne 'idle')
                 if ($purpose -eq 'voice-manage') {
                     [void](Complete-VoiceDesktopAction -Result $result -Context $job.VoiceDesktopActionContext)
@@ -497,6 +523,10 @@ try {
                     [void](Complete-VoiceTaskSearch -Result $result -Context $job.VoiceTaskSwitchContext)
                 } elseif ($purpose -eq 'voice-bind') {
                     [void](Complete-VoiceTaskBind -Result $result -Context $job.VoiceTaskSwitchContext)
+                } elseif ($purpose -eq 'secretary-list') {
+                    [void](Complete-SecretaryCandidateList $result $job.SecretaryTurnContext $now)
+                } elseif ($purpose -eq 'secretary-validate') {
+                    [void](Complete-SecretaryLiveAction $result $job.SecretaryActionContext)
                 } elseif ($purpose -eq 'bind') {
                     $bound=Complete-ManualTaskBinding $result $job.TaskBindingContext
                     if ($bound -and $TestAudioPath) { $script:recMode='transcribing'; Begin-Transcription $TestAudioPath $false; $TestAudioPath='' }
@@ -541,7 +571,7 @@ try {
                     $AnswerBox.Text=$answer.Text; $AnswerBox.ScrollToHome()
                     if ($answer.UserTurnVersion -eq $script:tail.UserTurnVersion) {
                         $script:busy=$false; $script:notice='回答完成。'
-                        if (-not (Save-EarlyShortFollowUpAnswer $answer)) {
+                        if (-not (Get-Command Save-EarlyShortFollowUpAnswer -ErrorAction SilentlyContinue) -or -not (Save-EarlyShortFollowUpAnswer $answer)) {
                             if ($script:autoRead) { Queue-AnswerSpeech $answer.Text }
                             if (Get-Command Register-ShortFollowUpAnswer -ErrorAction SilentlyContinue) { Register-ShortFollowUpAnswer $answer }
                         }
@@ -550,6 +580,7 @@ try {
             }
             Try-AutoDispatch
             Complete-AssistantSpeech
+            if (Get-Command Update-SecretaryConversation -ErrorAction SilentlyContinue) { Update-SecretaryConversation $now }
             $playbackState=[CodexReader.AudioPlayer]::State
             $playing=($playbackState -eq 'playing')
             $playbackHeld=($playbackState -in @('playing','paused'))
@@ -560,7 +591,8 @@ try {
             Update-ShortFollowUp $now
 
             Update-AssistantAudioLevel
-            $StatusLabel.Text=if ($script:recMode -eq 'arming') { if ($script:followUpCapture) { '连续接话 · 正在准备麦克风…' } else { '正在准备麦克风…' } }
+            $StatusLabel.Text=if ($script:secretaryPhase -in @('listening','transcribing','thinking','speaking','paused','error')) { '连续对话 · '+$script:secretaryStatus }
+                elseif ($script:recMode -eq 'arming') { if ($script:followUpCapture) { '连续接话 · 正在准备麦克风…' } else { '正在准备麦克风…' } }
                 elseif ($script:recMode -eq 'listening') { $(if ($script:followUpCapture) { '连续接话 · 正在听 · ' } else { '正在听 · ' }) + [int]($now-$script:recorder.StartedUtc).TotalSeconds + ' 秒' }
                 elseif ($script:recMode -in @('stopping','transcribing')) { '正在把语音转成文字…' }
                 elseif ($now -lt $script:localCommandNoticeUntil) { $script:localCommandMessage + $(if ($script:pendingUncertain) { ' · 上次发送仍待核对' } elseif ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send') { ' · 消息正在发送' }) }
@@ -589,9 +621,9 @@ try {
             $SpeakButton.IsEnabled=(($script:connected -or $script:bindingAvailability -in @('archived','missing')) -and $script:recMode -in @('idle','listening') -and -not ($script:bridgeJob -and $script:bridgeJob.Purpose -eq 'send'))
             $localReady=($script:recMode -eq 'idle' -and $null -ne (Get-AssistantVoiceCommand $InputBox.Text))
             $SendButton.IsEnabled=($localReady -or ($script:connected -and $script:bindingAvailability -notin @('archived','missing','unknown') -and -not $script:bindingReadError -and -not $script:bridgeJob -and $script:recMode -ne 'arming' -and -not $script:pendingUncertain))
-            $StopButton.Content=if ($script:shortFollowUp -or $script:followUpCapture) { '结束接话' } elseif ($script:recMode -ne 'idle') { '取消录音' } else { '停止朗读' }
+            $StopButton.Content=if ($script:continuousConversationEnabled) { '暂停对话' } elseif ($script:shortFollowUp -or $script:followUpCapture) { '结束接话' } elseif ($script:recMode -ne 'idle') { '取消录音' } else { '停止朗读' }
             $AnswerStateLabel.Text=if ($script:busy) { '处理中' } elseif ($playing) { '正在朗读' } else { '文字 · 语音' }
-            $FooterHint.Text=if ($script:shortFollowUp -or $script:followUpCapture) { '连续接话有时限 · 可随时点“结束接话”' } elseif ($script:noWakeMode -eq 'observe') { '免唤醒仅试判 · 不执行、不发送 · 可在设置中关闭' } elseif ($script:noWakeMode -eq 'context') { '免唤醒实验 · 仅限当前候选确认 · 可在设置中关闭' } elseif ($script:handsFreeEnabled -and $script:recMode -eq 'idle' -and $InputBox.Text.Trim()) { '草稿已保留 · 发送或自行清空后恢复唤醒；也可点击开始说话继续补充' } elseif ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
+            $FooterHint.Text=if ($script:continuousConversationEnabled) { '连续对话有限时长 · 可随时暂停 · 工作回执与收音状态分开' } elseif ($script:shortFollowUp -or $script:followUpCapture) { '连续接话有时限 · 可随时点“结束接话”' } elseif ($script:handsFreeEnabled -and $script:recMode -eq 'idle' -and $InputBox.Text.Trim()) { '草稿已保留 · 发送或自行清空后恢复唤醒；也可点击开始说话继续补充' } elseif ($script:handsFreeEnabled) { '喊“'+$script:wakePhrase+'”唤醒' } elseif ($script:autoSend) { '停顿两秒后自动发送' } else { '说完点发送，或先检查文字' }
             if ($followUpItem) { $followUpItem.Enabled=[bool]($script:shortFollowUp -or $script:followUpCapture) }
             Update-DesktopDisplay
             if ($script:positionDirty -and ($now-$script:lastPositionChange).TotalMilliseconds -gt 700) { $script:positionDirty=$false; Save-Settings }
@@ -627,7 +659,7 @@ try {
             $StatusLabel.Text=$script:notice
         }
         if ($StatusPath -and ([DateTime]::UtcNow-$script:lastStatusWrite).TotalMilliseconds -ge 250) {
-            $statusData=@{version=8;noWakeMode=$script:noWakeMode;noWakePhase=$script:noWakePhase;noWakeJudgmentCount=$script:noWakeJudgmentCount;noWakeAcceptedCount=$script:noWakeAcceptedCount;noWakeLastDecision=$script:noWakeLastDecision;noWakeDroppedSegments=if($script:noWakeCapture){$script:noWakeCapture.DroppedCount}else{0};noWakeError=$script:noWakeLastError;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;shortFollowUpPhase=if($script:shortFollowUp){$script:shortFollowUp.Phase}else{'idle'};followUpCapture=$script:followUpCapture;echoReady=(Test-FullDuplexReady);echoQuestionCapture=$script:echoQuestionCapture;handsFreeEnabled=$script:handsFreeEnabled;handsFreePhase=$script:handsFreePhase;wakePhrase=$script:wakePhrase;wakeCount=$script:wakeCount;wakeListening=$script:wakeListener.IsListening;wakeReady=$script:wakeListener.IsReady;autoSendPrepared=$script:autoSendPrepared;connected=$script:connected;threadId=$script:threadId;recordingMode=$script:recMode;level=$script:level;status=$StatusLabel.Text;received=$script:received;spoken=$script:spoken;sent=$script:sent;busy=$script:busy;error=$script:errorText;micReady=$script:mic.Ready;micActive=$script:mic.AnyCaptureActive;topmost=$window.Topmost;windowVisible=$window.IsVisible;voice=$script:voiceId;autoSend=$script:autoSend;playerState=[CodexReader.AudioPlayer]::State;compact=(-not $script:captionsVisible);style=$script:waveStyle;waveSize=$script:waveSize;speechRate=$script:speechRate;autoRead=$script:autoRead;settingsVisible=$desktop.SettingsWindow.IsVisible;captionVisible=$desktop.CaptionWindow.IsVisible;pid=$PID}
+            $statusData=@{version=9;conversationEnabled=$script:continuousConversationEnabled;conversationPhase=$script:secretaryPhase;conversationTurnCount=$script:secretaryTurnCount;conversationStatus=$script:secretaryStatus;conversationPendingConfirmation=[bool]$script:secretaryPendingConfirmation;conversationWorkState=if($script:secretaryWork){$script:secretaryWork.State}else{''};noWakeMode=$script:noWakeMode;noWakePhase=$script:noWakePhase;noWakeJudgmentCount=$script:noWakeJudgmentCount;noWakeAcceptedCount=$script:noWakeAcceptedCount;noWakeLastDecision=$script:noWakeLastDecision;noWakeDroppedSegments=if($script:noWakeCapture){$script:noWakeCapture.DroppedCount}else{0};noWakeError=$script:noWakeLastError;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;shortFollowUpPhase=if($script:shortFollowUp){$script:shortFollowUp.Phase}else{'idle'};followUpCapture=$script:followUpCapture;echoReady=(Test-FullDuplexReady);echoQuestionCapture=$script:echoQuestionCapture;handsFreeEnabled=$script:handsFreeEnabled;handsFreePhase=$script:handsFreePhase;wakePhrase=$script:wakePhrase;wakeCount=$script:wakeCount;wakeListening=$script:wakeListener.IsListening;wakeReady=$script:wakeListener.IsReady;autoSendPrepared=$script:autoSendPrepared;connected=$script:connected;threadId=$script:threadId;recordingMode=$script:recMode;level=$script:level;status=$StatusLabel.Text;received=$script:received;spoken=$script:spoken;sent=$script:sent;busy=$script:busy;error=$script:errorText;micReady=$script:mic.Ready;micActive=$script:mic.AnyCaptureActive;topmost=$window.Topmost;windowVisible=$window.IsVisible;voice=$script:voiceId;autoSend=$script:autoSend;playerState=[CodexReader.AudioPlayer]::State;compact=(-not $script:captionsVisible);style=$script:waveStyle;waveSize=$script:waveSize;speechRate=$script:speechRate;autoRead=$script:autoRead;settingsVisible=$desktop.SettingsWindow.IsVisible;captionVisible=$desktop.CaptionWindow.IsVisible;pid=$PID}
             if ($TestMode) { $statusData.inputText=$InputBox.Text; $statusData.answerText=$AnswerBox.Text; $statusData.testCommand=$script:lastTestCommand; $statusData.taskCandidateCount=@($script:taskCandidates).Count; $statusData.selectedTaskId=if ($TaskCombo.SelectedItem) { [string]$TaskCombo.SelectedItem.threadId } else { '' } }
             $statusData.localCommandCount=$script:localCommandCount
             $statusData.bindingHealthy=($script:connected -and $script:bindingAvailability -notin @('archived','missing','unknown') -and -not $script:bindingReadError)
@@ -701,7 +733,7 @@ try {
             $script:lastStatusWrite=[DateTime]::UtcNow
         }
     })
-    $window.Add_Closed({ $script:closing=$true; if (Get-Command Close-BindingProbe -ErrorAction SilentlyContinue) { Close-BindingProbe }; Reset-ManualTaskBinding; Reset-VoiceTaskSwitch; Invalidate-VoiceTaskCreateBinding -Reason '声伴已关闭'; $script:voiceGeneration++; $script:autoDispatch=$null; if (Get-Command Close-NoWakeConversation -ErrorAction SilentlyContinue) { Close-NoWakeConversation }; Suspend-WakeListener; $timer.Stop(); Stop-Output; if ($script:recMode -ne 'idle') { Cancel-Recording }; if (-not $PreviewPath) { $window.Dispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background) } })
+    $window.Add_Closed({ $script:closing=$true; if (Get-Command Close-BindingProbe -ErrorAction SilentlyContinue) { Close-BindingProbe }; Reset-ManualTaskBinding; Reset-VoiceTaskSwitch; Invalidate-VoiceTaskCreateBinding -Reason '声伴已关闭'; $script:voiceGeneration++; $script:autoDispatch=$null; if (Get-Command Stop-SecretaryConversation -ErrorAction SilentlyContinue) { Stop-SecretaryConversation '声伴已关闭。' }; if (Get-Command Close-NoWakeConversation -ErrorAction SilentlyContinue) { Close-NoWakeConversation }; Suspend-WakeListener; $timer.Stop(); Stop-Output; if ($script:recMode -ne 'idle') { Cancel-Recording }; if (-not $PreviewPath) { $window.Dispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background) } })
     if ($PreviewPath) {
         $TaskLabel.Text='当前 Codex 任务'; $StatusLabel.Text='点击开始说话'; $window.Show(); $window.UpdateLayout()
         $render=New-Object Windows.Media.Imaging.RenderTargetBitmap([int]$window.ActualWidth,[int]$window.ActualHeight,96,96,[Windows.Media.PixelFormats]::Pbgra32)

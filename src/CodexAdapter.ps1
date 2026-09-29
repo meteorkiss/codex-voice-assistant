@@ -38,7 +38,7 @@
 # Validate local dispatch before creating request files or touching a ledger.
 # Python still validates live capabilities and exact destination ownership.
 function Assert-CodexBridgeRequest($Request,[string]$Purpose) {
-    $actions=@{list='list';'voice-find'='find';bind='read';'voice-bind'='read';'voice-create-bind'='read';
+    $actions=@{list='list';'secretary-list'='list';'voice-find'='find';bind='read';'voice-bind'='read';'voice-create-bind'='read';'secretary-validate'='read';
         open='open';send='send';'voice-create'='create';'voice-create-status'='create-status';'voice-manage'='manage'}
     if ($Request -isnot [hashtable] -or -not $actions.ContainsKey($Purpose) -or
         $Request.action -isnot [string] -or $Request.action -cne $actions[$Purpose]) { throw '本地操作与连接请求不匹配。' }

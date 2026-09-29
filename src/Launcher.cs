@@ -38,6 +38,7 @@ internal static class Launcher
                 @"src\MicGuard.cs", @"src\JarvisRecorder.cs",
                 @"src\WakeListener.cs", @"src\HandsFree.ps1", @"src\WakeRecovery.ps1",
                 @"src\NoWakeCapture.cs", @"src\NoWakeDecision.ps1", @"src\NoWakeConversation.ps1",
+                @"src\SecretaryConversation.ps1", @"src\secretary_model_client.py",
                 @"src\DesktopShell.ps1", @"src\DesktopController.ps1", @"src\WaveformView.cs",
                 @"src\DesktopTopmost.ps1", @"src\DesktopTopmost.cs",
                 @"src\VoiceCommands.ps1", @"src\LocalCommands.ps1",

@@ -91,7 +91,7 @@ $script:uiTimer.Add_Tick({
             if($centerStop.Template.FindName('StopGlyph',$centerStop).Visibility -ne 'Visible' -or $centerStop.Tag -ne 'stop'){throw 'Center stop button does not retain its stop visual during the dispatcher loop.'}
             $script:uiSteps.Add('default wake row and playback labels including center glyph update correctly')
         }
-        16 { $script:ui.Controls.SettingsNavigation.SelectedIndex=2;if($script:ui.Controls.AppearancePage.Visibility -ne 'Visible'){throw 'Appearance navigation failed.'};$script:ui.Controls.SettingsNavigation.SelectedIndex=0;$script:uiSteps.Add('appearance and connection navigation work after popup use') }
+        16 { $script:ui.Controls.SettingsNavigation.SelectedIndex=3;if($script:ui.Controls.AppearancePage.Visibility -ne 'Visible'){throw 'Appearance navigation failed.'};$script:ui.Controls.SettingsNavigation.SelectedIndex=0;$script:uiSteps.Add('appearance and connection navigation work after popup use') }
         17 { $script:ui.Window.Close(); $script:uiSteps.Add('close floating window permanently') }
         18 { Close-DesktopShell $script:ui; Close-DesktopShell $script:ui; $script:uiSteps.Add('idempotent cleanup'); $script:uiTimer.Stop(); $script:uiDispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background) }
     }

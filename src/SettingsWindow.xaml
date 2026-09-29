@@ -49,6 +49,7 @@
       <ListBox Name="SettingsNavigation" Background="Transparent" BorderThickness="0" SelectedIndex="0" ItemContainerStyle="{StaticResource NavItem}" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="设置分类">
         <ListBoxItem Name="ConnectionNavItem" Content="连接"/>
         <ListBoxItem Name="SoundNavItem" Content="声音"/>
+        <ListBoxItem Name="ConversationNavItem" Content="连续对话"/>
         <ListBoxItem Name="AppearanceNavItem" Content="外观"/>
       </ListBox>
     </DockPanel></Border>
@@ -87,9 +88,31 @@
               <TextBlock Name="WakeHintLabel" Text="2—16 个汉字，建议 4—6 字；听到‘在’后开始说话。" Style="{StaticResource Note}" Margin="0,0,0,7"/><Border Style="{StaticResource Divider}"/>
               <CheckBox Name="BargeInToggle" Content="朗读时也可唤醒" MinHeight="33"/><TextBlock Name="EchoStatusLabel" Text="" Style="{StaticResource Note}" Margin="0,0,0,6"/><Border Style="{StaticResource Divider}"/>
               <CheckBox Name="ShortFollowUpToggle" Content="回答后短时连续接话（默认关闭）" MinHeight="33"/><TextBlock Text="仅在唤醒交流的回答朗读完毕后等待 6 秒；单句最长 30 秒。" Style="{StaticResource Note}" Margin="0,0,0,6"/><Border Style="{StaticResource Divider}"/>
-              <Grid Margin="0,7"><Grid.ColumnDefinitions><ColumnDefinition Width="112"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="免唤醒实验" VerticalAlignment="Center"/><ComboBox Name="NoWakeModeCombo" Grid.Column="1" AutomationProperties.Name="免唤醒实验模式"/></Grid>
-              <TextBlock Name="NoWakeStatusLabel" Text="默认关闭。仅试判不会执行；上下文确认只处理当前候选的是、否、取消或编号。" Style="{StaticResource Note}" Margin="0,0,0,7"/><Border Style="{StaticResource Divider}"/>
               <CheckBox Name="AutoSendToggle" Content="手动录音停顿后自动发送" MinHeight="33"/>
+            </StackPanel></Border>
+          </StackPanel>
+        </ScrollViewer>
+        <ScrollViewer Name="ConversationPage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,3,0">
+          <StackPanel><TextBlock Text="连续对话" Style="{StaticResource SectionLabel}"/>
+            <Border Style="{StaticResource SettingsGroup}"><StackPanel>
+              <CheckBox Name="ContinuousConversationToggle" Content="开启连续对话（每次启动默认关闭）" MinHeight="36"/>
+              <TextBlock Name="ConversationSettingsStatus" Text="请先完成服务配置和文本发送同意。" Style="{StaticResource Note}" Margin="0,0,0,8"/>
+              <Border Style="{StaticResource Divider}"/>
+              <TextBlock Text="OpenAI-compatible Chat Completions 地址" Margin="0,10,0,6"/>
+              <TextBox Name="ModelEndpointBox" Text="" AutomationProperties.Name="文本模型服务地址"/>
+              <TextBlock Text="首版要求 HTTPS 和 response_format=json_schema；只有 localhost / 127.0.0.1 / ::1 可用 HTTP。" Style="{StaticResource Note}" Margin="0,6,0,9"/>
+              <TextBlock Text="模型名称" Margin="0,4,0,6"/><TextBox Name="ModelNameBox" Text="" AutomationProperties.Name="文本模型名称"/>
+              <Grid Margin="0,10,0,6"><Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="鉴权方式" VerticalAlignment="Center"/><ComboBox Name="ModelAuthModeCombo" Grid.Column="1" AutomationProperties.Name="文本模型鉴权方式"/></Grid>
+              <TextBlock Text="凭据环境变量名" Margin="0,5,0,6"/><TextBox Name="ModelCredentialEnvBox" Text="" AutomationProperties.Name="凭据环境变量名"/>
+              <TextBlock Text="这里只填变量名（例如 SHENGBAN_MODEL_API_KEY），不要填写密钥。声伴不会扫描其它环境变量。无鉴权仅限显式配置的 loopback 本地服务。" Style="{StaticResource Note}" Margin="0,6,0,10"/>
+              <Border Style="{StaticResource Divider}"/>
+              <CheckBox Name="ModelDataConsentToggle" Content="我同意向上述文本服务发送：当前分句转写、少量内存对话、任务候选显示名" MinHeight="48"/>
+              <TextBlock Text="不会发送音频、任务编号、聊天正文、文件内容或路径。关闭同意时模型网络请求为零。" Style="{StaticResource Note}" Margin="0,0,0,7"/>
+              <CheckBox Name="ConversationTtsConsentToggle" Content="我同意把声伴回复发送给现有在线朗读服务" MinHeight="42"/>
+              <TextBlock Text="不同意时仍显示回复，但连续对话不会调用在线朗读；不会改变 Codex 回答的既有自动朗读设置。" Style="{StaticResource Note}" Margin="0,0,0,8"/>
+              <Border Style="{StaticResource Divider}"/>
+              <Grid Margin="0,9,0,5"><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="空闲退出（秒）" VerticalAlignment="Center"/><TextBox Name="ConversationIdleBox" Grid.Column="1" Text="90" AutomationProperties.Name="连续对话空闲退出秒数"/><TextBlock Grid.Column="2" Text="30—600" Style="{StaticResource Note}" VerticalAlignment="Center" Margin="9,0,0,0"/></Grid>
+              <Grid Margin="0,5,0,9"><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="最多轮数" VerticalAlignment="Center"/><TextBox Name="ConversationMaxTurnsBox" Grid.Column="1" Text="20" AutomationProperties.Name="连续对话最多轮数"/><TextBlock Grid.Column="2" Text="1—100；总时长另有限制" Style="{StaticResource Note}" VerticalAlignment="Center" Margin="9,0,0,0"/></Grid>
             </StackPanel></Border>
           </StackPanel>
         </ScrollViewer>

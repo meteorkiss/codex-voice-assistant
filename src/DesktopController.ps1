@@ -6,6 +6,49 @@
 function Test-NoWakeModeActive {
     return [bool]((Get-Variable -Name noWakeMode -Scope Script -ErrorAction SilentlyContinue) -and $script:noWakeMode -ne 'off')
 }
+function Sync-ConversationSettingsFromControls {
+    if (-not $desktop.Controls.ContainsKey('ModelEndpointBox')) { return $false }
+    $names=@('modelEndpoint','modelName','modelAuthMode','modelCredentialEnv','modelDataConsent','conversationTtsConsent','conversationIdleSeconds','conversationMaxTurns')
+    $before=@{};foreach($name in $names){$before[$name]=Get-Variable -Name $name -Scope Script -ValueOnly}
+    try {
+        $script:modelEndpoint=$desktop.Controls.ModelEndpointBox.Text.Trim()
+        $script:modelName=$desktop.Controls.ModelNameBox.Text.Trim()
+        if ($desktop.Controls.ModelAuthModeCombo.SelectedItem) { $script:modelAuthMode=[string]$desktop.Controls.ModelAuthModeCombo.SelectedItem.id }
+        $script:modelCredentialEnv=$desktop.Controls.ModelCredentialEnvBox.Text.Trim()
+        $script:modelDataConsent=[bool]$desktop.Controls.ModelDataConsentToggle.IsChecked
+        $script:conversationTtsConsent=[bool]$desktop.Controls.ConversationTtsConsentToggle.IsChecked
+        $number=0
+        if ([int]::TryParse($desktop.Controls.ConversationIdleBox.Text,[ref]$number)) { $script:conversationIdleSeconds=[Math]::Max(30,[Math]::Min(600,$number)) }
+        if ([int]::TryParse($desktop.Controls.ConversationMaxTurnsBox.Text,[ref]$number)) { $script:conversationMaxTurns=[Math]::Max(1,[Math]::Min(100,$number)) }
+        $desktop.Controls.ConversationIdleBox.Text=[string]$script:conversationIdleSeconds
+        $desktop.Controls.ConversationMaxTurnsBox.Text=[string]$script:conversationMaxTurns
+        Save-Settings
+        return $true
+    } catch {
+        foreach($name in $names){Set-Variable -Name $name -Value $before[$name] -Scope Script}
+        $script:notice='连续对话设置没有保存，已恢复原配置。'
+        try { Sync-DesktopPreferences } catch { }
+        return $false
+    }
+}
+function Toggle-SecretaryConversationUi([switch]$Stop) {
+    if ($Stop) {
+        Stop-SecretaryConversation '连续对话已关闭；原唤醒入口仍可使用。'
+    } elseif (-not (Sync-ConversationSettingsFromControls)) {
+        return
+    } elseif ($script:continuousConversationEnabled -and $script:secretaryPhase -ne 'paused') {
+        Pause-SecretaryConversation '连续对话已立即暂停；再次点击即可继续。'
+    } elseif ($script:secretaryPhase -eq 'paused') {
+        [void](Resume-SecretaryConversation)
+    } else {
+        [void](Start-SecretaryConversation)
+    }
+    if ($script:continuousConversationEnabled) {
+        Set-CaptionsVisible $true
+        Set-CaptionExpanded $true
+    }
+    Sync-DesktopPreferences
+}
 function Show-AssistantSettings {
     Show-DesktopSettings $desktop
     if (-not $script:tasksLoaded -and -not $script:bridgeJob) { Refresh-AssistantTasks }
@@ -81,7 +124,7 @@ function Set-CaptionsVisible([bool]$Visible) {
 }
 function Set-CaptionExpanded([bool]$Expanded) {
     $script:captionExpanded=$Expanded
-    $desktop.CaptionWindow.Height=if ($Expanded) { 420 } else { 200 }
+    $desktop.CaptionWindow.Height=if ($Expanded) { 560 } elseif ($script:continuousConversationEnabled) { 320 } else { 200 }
     foreach ($key in @('CaptionInputPanel','CaptionActions')) {
         if ($desktop.Controls.ContainsKey($key)) { $desktop.Controls[$key].Visibility=if ($Expanded) { 'Visible' } else { 'Collapsed' } }
     }
@@ -165,6 +208,20 @@ function Sync-DesktopPreferences {
         }
         $AutoSendToggle.IsChecked=$script:autoSend
         $AutoReadToggle.IsChecked=$script:autoRead
+        if ($desktop.Controls.ContainsKey('ContinuousConversationToggle')) {
+            $desktop.Controls.ContinuousConversationToggle.IsChecked=[bool]$script:continuousConversationEnabled
+            $desktop.Controls.ModelEndpointBox.Text=[string]$script:modelEndpoint
+            $desktop.Controls.ModelNameBox.Text=[string]$script:modelName
+            $desktop.Controls.ModelCredentialEnvBox.Text=[string]$script:modelCredentialEnv
+            $desktop.Controls.ModelDataConsentToggle.IsChecked=[bool]$script:modelDataConsent
+            $desktop.Controls.ConversationTtsConsentToggle.IsChecked=[bool]$script:conversationTtsConsent
+            $desktop.Controls.ConversationIdleBox.Text=[string]$script:conversationIdleSeconds
+            $desktop.Controls.ConversationMaxTurnsBox.Text=[string]$script:conversationMaxTurns
+            foreach($entry in $desktop.Controls.ModelAuthModeCombo.Items){if($entry.id -ceq $script:modelAuthMode){$desktop.Controls.ModelAuthModeCombo.SelectedItem=$entry;break}}
+        }
+        if ($desktop.Controls.ContainsKey('ConversationPanel')) { $desktop.Controls.ConversationPanel.Visibility=if($script:continuousConversationEnabled -or $desktop.Controls.ConversationBox.Text){'Visible'}else{'Collapsed'} }
+        if ($desktop.Controls.ContainsKey('ConversationToggleButton')) { $desktop.Controls.ConversationToggleButton.Content=if($script:secretaryPhase -eq 'paused'){'继续对话'}elseif($script:continuousConversationEnabled){'暂停对话'}else{'连续对话'} }
+        if ($desktop.Controls.ContainsKey('MenuConversation')) { $desktop.Controls.MenuConversation.IsChecked=[bool]$script:continuousConversationEnabled;$desktop.Controls.MenuConversation.Header=if($script:secretaryPhase -eq 'paused'){'继续连续对话'}elseif($script:continuousConversationEnabled){'暂停连续对话'}else{'开启连续对话'} }
         $MenuVisibility.Header=if ($script:floatingVisible) { '隐藏悬浮声波' } else { '显示悬浮声波' }
         if ($showItem) { $showItem.Text=if ($script:floatingVisible) { '隐藏悬浮声波' } else { '显示悬浮声波' } }
         if ($pinItem) { $pinItem.Checked=$script:pinned }
@@ -235,6 +292,7 @@ function Update-DesktopDisplay {
         $desktop.Controls.RecoveryDraftButton.IsEnabled=($script:recoveryDraftCount -gt 0)
         $desktop.Controls.RecoveryDraftButton.Content='查看保留草稿（'+[int]$script:recoveryDraftCount+'）'
     }
+    if ($desktop.Controls.ContainsKey('ConversationSettingsStatus')) { $desktop.Controls.ConversationSettingsStatus.Text=[string]$script:secretaryStatus }
     $RefreshTasksButton.IsEnabled=(-not $script:bridgeJob)
     $OpenTaskButton.IsEnabled=($script:connected -and -not $script:bridgeJob)
 }
@@ -255,6 +313,10 @@ function Initialize-DesktopController {
     if ($desktop.Controls.ContainsKey('NoWakeModeCombo')) {
         $desktop.Controls.NoWakeModeCombo.DisplayMemberPath='name'
         foreach ($entry in @(@{id='off';name='关闭（默认）'},@{id='observe';name='仅试判 · 不执行'},@{id='context';name='仅上下文确认 · 实验'})) { [void]$desktop.Controls.NoWakeModeCombo.Items.Add([pscustomobject]$entry) }
+    }
+    if ($desktop.Controls.ContainsKey('ModelAuthModeCombo')) {
+        $desktop.Controls.ModelAuthModeCombo.DisplayMemberPath='name'
+        foreach($entry in @(@{id='bearer';name='Bearer · 环境变量引用'},@{id='none';name='无鉴权 · 仅本机 loopback'})){[void]$desktop.Controls.ModelAuthModeCombo.Items.Add([pscustomobject]$entry)}
     }
     $script:syncingUi=$false
     if ($desktop.Controls.ContainsKey('WakePhraseBox')) {
@@ -294,6 +356,21 @@ function Initialize-DesktopController {
                 [void](Invoke-DesktopPreference @{noWakeMode=[string]$desktop.Controls.NoWakeModeCombo.SelectedItem.id})
             }
         })
+    }
+    if ($desktop.Controls.ContainsKey('ContinuousConversationToggle')) {
+        $desktop.Controls.ContinuousConversationToggle.Add_Click({
+            if ([bool]$desktop.Controls.ContinuousConversationToggle.IsChecked) { Toggle-SecretaryConversationUi }
+            else { Toggle-SecretaryConversationUi -Stop }
+        })
+        foreach($name in @('ModelEndpointBox','ModelNameBox','ModelCredentialEnvBox','ConversationIdleBox','ConversationMaxTurnsBox')) {
+            $desktop.Controls[$name].Add_LostKeyboardFocus({ Sync-ConversationSettingsFromControls })
+        }
+        $desktop.Controls.ModelAuthModeCombo.Add_SelectionChanged({if(-not $script:syncingUi){Sync-ConversationSettingsFromControls}})
+        $desktop.Controls.ModelDataConsentToggle.Add_Click({
+            Sync-ConversationSettingsFromControls
+            if (-not $script:modelDataConsent -and $script:continuousConversationEnabled) { Stop-SecretaryConversation '文本发送同意已关闭；连续对话已安全停止。' }
+        })
+        $desktop.Controls.ConversationTtsConsentToggle.Add_Click({Sync-ConversationSettingsFromControls})
     }
     $AutoReadToggle.Add_Click({ [void](Invoke-DesktopPreference @{autoRead=[bool]$AutoReadToggle.IsChecked}) })
     $AutoSendToggle.Add_Click({ [void](Invoke-DesktopPreference @{autoSend=[bool]$AutoSendToggle.IsChecked}) })
@@ -346,6 +423,8 @@ function Initialize-DesktopController {
     $MenuSettings.Add_Click({ Show-AssistantSettings })
     if ($desktop.Controls.ContainsKey('RecoveryDraftButton')) { $desktop.Controls.RecoveryDraftButton.Add_Click({ Open-AssistantRecoveryDraft }) }
     if ($desktop.Controls.ContainsKey('MenuPauseResume')) { $desktop.Controls.MenuPauseResume.Add_Click({ Toggle-AnswerPlayback }) }
+    if ($desktop.Controls.ContainsKey('MenuConversation')) { $desktop.Controls.MenuConversation.Add_Click({ Toggle-SecretaryConversationUi }) }
+    if ($desktop.Controls.ContainsKey('ConversationToggleButton')) { $desktop.Controls.ConversationToggleButton.Add_Click({ Toggle-SecretaryConversationUi }) }
     if ($desktop.Controls.ContainsKey('PauseResumeButton')) { $desktop.Controls.PauseResumeButton.Add_Click({ Toggle-AnswerPlayback }) }
     if ($desktop.Controls.ContainsKey('CenterPlaybackButton')) { $desktop.Controls.CenterPlaybackButton.Add_Click({ Invoke-CenterPlayback }) }
     if ($desktop.Controls.ContainsKey('CenterStopButton')) { $desktop.Controls.CenterStopButton.Add_Click({ Invoke-CenterStop }) }

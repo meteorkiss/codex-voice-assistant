@@ -62,6 +62,37 @@ function Remove-StaleNoWakeFiles([string]$StateDirectory,[string]$CurrentRun) {
     } catch { $script:workerWarning='旧免唤醒临时文件检查未完成，不影响本次启动。' }
 }
 
+# Secretary request files can contain transcript text and in-memory dialogue.
+# They are read-only jobs, never durable receipts, so an abandoned prior run
+# may remove only these exact names after the single-instance mutex is owned.
+function Remove-SecretaryFilesFromRun([string]$StateDirectory,[string]$Candidate) {
+    if (-not (Test-AssistantRunDirectory $StateDirectory $Candidate)) { return $false }
+    $removed=$true
+    try {
+        foreach ($file in [IO.Directory]::GetFiles([IO.Path]::GetFullPath($Candidate),'*.secretary*',[IO.SearchOption]::TopDirectoryOnly)) {
+            $name=[IO.Path]::GetFileName($file)
+            if ($name -notmatch '^[0-9a-f]{32}\.secretary(?:-result)?\.json(?:\.(?:[0-9a-f]{32}\.)?tmp)?$') { continue }
+            if (([IO.File]::GetAttributes($file) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $removed=$false; continue }
+            try { [IO.File]::Delete($file) } catch { $removed=$false; $script:workerWarning='连续对话临时文字仍被占用，将在下次启动时再次清理。' }
+        }
+        return $removed
+    } catch {
+        $script:workerWarning='连续对话临时文字检查未完成，不影响本次启动。'
+        return $false
+    }
+}
+
+function Remove-StaleSecretaryFiles([string]$StateDirectory,[string]$CurrentRun) {
+    try {
+        if (-not $StateDirectory -or -not [IO.Directory]::Exists($StateDirectory)) { return }
+        $currentFull=if ($CurrentRun) { [IO.Path]::GetFullPath($CurrentRun).TrimEnd('\') } else { '' }
+        foreach ($candidate in [IO.Directory]::GetDirectories([IO.Path]::GetFullPath($StateDirectory),'run-*',[IO.SearchOption]::TopDirectoryOnly)) {
+            if ($currentFull -and [string]::Equals([IO.Path]::GetFullPath($candidate).TrimEnd('\'),$currentFull,[StringComparison]::OrdinalIgnoreCase)) { continue }
+            [void](Remove-SecretaryFilesFromRun $StateDirectory $candidate)
+        }
+    } catch { $script:workerWarning='连续对话临时文字检查未完成，不影响本次启动。' }
+}
+
 function Close-Job($Job, [switch]$Kill) {
     if ($null -eq $Job) { return }
     try {

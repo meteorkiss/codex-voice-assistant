@@ -43,6 +43,10 @@ function New-TranscriptTail($Path) {
 }
 function Cancel-Recording { $script:recMode='idle'; [void]$script:effects.Add(@{action='cancel'}) }
 function Set-HandsFree([bool]$Enabled) { [void]$script:effects.Add(@{action='setHandsFree';enabled=$Enabled;bargeInEnabled=$script:bargeInEnabled}); $script:handsFreeEnabled=$Enabled }
+function Start-SecretaryConversation { $script:continuousConversationEnabled=$true;$script:secretaryPhase='listening';$script:secretaryStatus='listening · synthetic';return $true }
+function Pause-SecretaryConversation([string]$Reason='') { $script:secretaryPhase='paused';$script:secretaryStatus='paused · '+$Reason }
+function Resume-SecretaryConversation { $script:continuousConversationEnabled=$true;$script:secretaryPhase='listening';$script:secretaryStatus='listening · synthetic';return $true }
+function Stop-SecretaryConversation([string]$Reason='') { $script:continuousConversationEnabled=$false;$script:secretaryPhase='off';$script:secretaryStatus='off · '+$Reason }
 function Test-FullDuplexReady { return [bool]$script:fakeEchoReady }
 function Begin-Recording { [void]$script:effects.Add(@{action='record';floatingVisible=$window.IsVisible;captionVisible=$desktop.CaptionWindow.IsVisible;editingVisible=($desktop.Controls.CaptionInputPanel.Visibility -eq 'Visible' -and $desktop.Controls.CaptionActions.Visibility -eq 'Visible')}) }
 function Assert-That([bool]$Condition,[string]$Message) { if (-not $Condition) { throw $Message } }
@@ -67,6 +71,9 @@ $script:connected=$false; $script:recMode='idle'; $script:autoRead=$true; $scrip
 $script:pinned=$true; $script:captionsVisible=$false; $script:floatingVisible=$false
 $script:handsFreeEnabled=$false; $script:handsFreePhase='off'; $script:wakePhrase='test'
 $script:bargeInEnabled=$true; $script:shortFollowUpEnabled=$false; $script:shortFollowUp=$null; $script:followUpCapture=$false; $script:fakeEchoReady=$false; $script:wakeListener=[pscustomobject]@{Error=''}
+$script:continuousConversationEnabled=$false;$script:secretaryPhase='off';$script:secretaryStatus='连续对话默认关闭。'
+$script:modelEndpoint='';$script:modelName='';$script:modelAuthMode='bearer';$script:modelCredentialEnv='';$script:modelDataConsent=$false;$script:conversationTtsConsent=$false
+$script:conversationIdleSeconds=90;$script:conversationMaxSeconds=600;$script:conversationMaxTurns=20
 $script:testWindowsShown=$false
 $script:voiceGeneration=0; $script:autoDispatch=$null; $script:pendingSends=@{}; $script:pendingUncertain=''
 $workspace=$projectRoot
@@ -306,6 +313,30 @@ try {
             [void]$VoiceCombo.Items.Add($unavailable);$VoiceCombo.SelectedItem=$unavailable
             Assert-That ($script:voiceId -ceq $previousVoice -and $VoiceCombo.SelectedItem.id -ceq $previousVoice -and $script:saved.Count -eq $before) 'Invalid voice selection stayed visible or was saved.'
         } finally {$VoiceCombo.Items.Remove($unavailable)}
+    }
+    Test-Case 'continuous conversation settings save atomically and visible controls pause resume and stop' {
+        $desktop.Controls.ModelEndpointBox.Text='https://models.example.test/v1/chat/completions'
+        $desktop.Controls.ModelNameBox.Text='synthetic-model'
+        $desktop.Controls.ModelCredentialEnvBox.Text='SHENGBAN_MODEL_KEY'
+        $desktop.Controls.ModelDataConsentToggle.IsChecked=$true
+        $desktop.Controls.ConversationTtsConsentToggle.IsChecked=$false
+        $desktop.Controls.ConversationIdleBox.Text='45';$desktop.Controls.ConversationMaxTurnsBox.Text='7'
+        Assert-That (Sync-ConversationSettingsFromControls) 'Valid continuous conversation settings did not save.'
+        Assert-That ($script:modelEndpoint -like 'https://*' -and $script:conversationIdleSeconds -eq 45 -and $script:conversationMaxTurns -eq 7) 'Continuous conversation controls did not update bounded settings.'
+        $desktop.Controls.ContinuousConversationToggle.IsChecked=$true;Invoke-Click $desktop.Controls.ContinuousConversationToggle
+        Assert-That ($script:continuousConversationEnabled -and $script:secretaryPhase -eq 'listening' -and $desktop.Controls.ConversationPanel.Visibility -eq 'Visible') 'Visible settings switch did not start and expose the continuous conversation.'
+        Invoke-Click $desktop.Controls.ConversationToggleButton
+        Assert-That ($script:secretaryPhase -eq 'paused') 'Caption conversation control did not pause the session.'
+        Invoke-Click $desktop.Controls.ConversationToggleButton
+        Assert-That ($script:secretaryPhase -eq 'listening') 'Caption conversation control did not resume the session.'
+        $savedEndpoint=$script:modelEndpoint;$script:preferenceSaveFails=$true
+        try {
+            $desktop.Controls.ModelEndpointBox.Text='https://unsaved.example.test/v1/chat/completions'
+            Assert-That (-not (Sync-ConversationSettingsFromControls)) 'Injected settings persistence failure reported success.'
+            Assert-That ($script:modelEndpoint -ceq $savedEndpoint -and $desktop.Controls.ModelEndpointBox.Text -ceq $savedEndpoint) 'Failed continuous settings save did not restore state and control.'
+        } finally {$script:preferenceSaveFails=$false}
+        $desktop.Controls.ContinuousConversationToggle.IsChecked=$false;Invoke-Click $desktop.Controls.ContinuousConversationToggle
+        Assert-That (-not $script:continuousConversationEnabled -and $script:secretaryPhase -eq 'off') 'Settings switch did not stop continuous conversation.'
     }
     Test-Case 'real settings create and replace stay inside the test directory' {
         $settingsPath=Join-Path $runRoot ('settings-'+[Guid]::NewGuid().ToString('N')+'.json')

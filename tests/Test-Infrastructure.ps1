@@ -100,12 +100,24 @@ try {
     $ordinaryTemp=Join-Path $oldRun 'receipt.json.tmp'
     $currentNoWake=Join-Path $currentRun (([Guid]::NewGuid().ToString('N'))+'.nowake.asr.json')
     foreach($privateFile in @($oldNoWake,$oldNoWakeTemp,$currentNoWake)){[IO.File]::WriteAllText($privateFile,'private fixture')}
+    $secretaryId=[Guid]::NewGuid().ToString('N')
+    $oldSecretary=Join-Path $oldRun ($secretaryId+'.secretary.json')
+    $oldSecretaryResult=Join-Path $oldRun ($secretaryId+'.secretary-result.json')
+    $oldSecretaryTemp=Join-Path $oldRun ($secretaryId+'.secretary-result.json.tmp')
+    $currentSecretary=Join-Path $currentRun (([Guid]::NewGuid().ToString('N'))+'.secretary.json')
+    $similarOrdinary=Join-Path $oldRun 'notes.secretary.json'
+    foreach($privateFile in @($oldSecretary,$oldSecretaryResult,$oldSecretaryTemp,$currentSecretary,$similarOrdinary)){[IO.File]::WriteAllText($privateFile,'private fixture')}
     [IO.File]::WriteAllText($ordinaryTemp,'preserve')
     Remove-StaleNoWakeFiles $cleanupRoot $currentRun
     Assert ((Test-Path -LiteralPath $oldRun) -and -not (Test-Path -LiteralPath $oldNoWake) -and -not (Test-Path -LiteralPath $oldNoWakeTemp) -and (Test-Path -LiteralPath (Join-Path $oldRun 'receipt.json')) -and (Test-Path -LiteralPath $ordinaryTemp)) 'Stale cleanup removed a receipt/run/ordinary temp or retained an owned no-wake file.'
     Assert ((Test-Path -LiteralPath $currentNoWake) -and (Test-Path -LiteralPath $invalidRun)) 'Stale cleanup touched the current or an unowned directory.'
     Assert (-not (Remove-NoWakeFilesFromRun $run $currentRun)) 'No-wake cleanup accepted a directory through the wrong state root.'
     Assert ((Remove-NoWakeFilesFromRun $cleanupRoot $currentRun) -and -not (Test-Path -LiteralPath $currentNoWake) -and (Test-Path -LiteralPath (Join-Path $currentRun 'receipt.json'))) 'Current no-wake cleanup removed a receipt or retained its owned file.'
+    Remove-StaleSecretaryFiles $cleanupRoot $currentRun
+    Assert (-not (Test-Path -LiteralPath $oldSecretary) -and -not (Test-Path -LiteralPath $oldSecretaryResult) -and -not (Test-Path -LiteralPath $oldSecretaryTemp)) 'Stale secretary cleanup retained transcript-bearing request files.'
+    Assert ((Test-Path -LiteralPath $currentSecretary) -and (Test-Path -LiteralPath $similarOrdinary) -and (Test-Path -LiteralPath (Join-Path $oldRun 'receipt.json'))) 'Stale secretary cleanup touched the current run, a non-owned similar name or a receipt.'
+    Assert (-not (Remove-SecretaryFilesFromRun $run $currentRun)) 'Secretary cleanup accepted a directory through the wrong state root.'
+    Assert ((Remove-SecretaryFilesFromRun $cleanupRoot $currentRun) -and -not (Test-Path -LiteralPath $currentSecretary) -and (Test-Path -LiteralPath (Join-Path $currentRun 'receipt.json'))) 'Current secretary cleanup removed a receipt or retained its owned file.'
 
     foreach ($kind in @('completed','cancelled','running','timeout','killFailure','send','voice-create','voice-manage')) {
         $file=Join-Path $runtime ($kind+'.input');[IO.File]::WriteAllText($file,'fixture')

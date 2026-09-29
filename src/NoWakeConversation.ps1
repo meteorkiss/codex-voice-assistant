@@ -47,6 +47,13 @@ function Get-NoWakeBlockReason([switch]$IgnoreVoiceFindBridge) {
     if ($script:noWakeMode -eq 'off') { return 'mode-off' }
     if ($script:closing) { return 'closing' }
     if ($script:recMode -ne 'idle' -or $script:asrJob) { return 'manual-recording' }
+    if ($script:noWakeMode -eq 'conversation') {
+        if (-not $script:continuousConversationEnabled -or $script:secretaryPhase -ne 'listening') { return 'secretary-busy' }
+        if ($script:bridgeJob) { return 'bridge-busy' }
+        if ($script:ttsJob -or $script:speechQueue.Count -gt 0 -or [CodexReader.AudioPlayer]::State -in @('playing','paused')) { return 'playback' }
+        if (Test-NoWakeExternalCapture) { return 'external-capture' }
+        return ''
+    }
     if ($script:bridgeJob -and (-not $IgnoreVoiceFindBridge -or $script:bridgeJob.Purpose -ne 'voice-find')) { return 'bridge-busy' }
     if ($script:pendingUncertain -or ($script:pendingSends -and $script:pendingSends.ContainsKey($script:threadId))) { return 'pending-send' }
     if ($InputBox.Text.Trim()) { return 'draft' }
@@ -81,7 +88,7 @@ function Stop-NoWakeAsr {
 }
 
 function Set-NoWakeMode([string]$Mode) {
-    if ($Mode -notin @('off','observe','context')) { throw '未知的免唤醒模式。' }
+    if ($Mode -notin @('off','conversation')) { throw '未知的连续对话采集模式。' }
     if ($Mode -ceq $script:noWakeMode) { return }
     $script:noWakeGeneration++
     Stop-NoWakeAsr
@@ -99,13 +106,10 @@ function Set-NoWakeMode([string]$Mode) {
     $script:noWakeNextStartUtc=[DateTime]::UtcNow.AddMilliseconds(800)
     if ($Mode -eq 'off') {
         $script:noWakePhase='off'
-        $script:notice='免唤醒实验已关闭；原语音唤醒和手动录音仍可使用。'
-    } elseif ($Mode -eq 'observe') {
-        $script:noWakePhase='starting'
-        $script:notice='免唤醒仅试判已开启；只在本机判断，不会执行或发送。'
+        $script:notice='连续对话收音已关闭；原语音唤醒和手动录音仍可使用。'
     } else {
         $script:noWakePhase='starting'
-        $script:notice='免唤醒上下文确认已开启；只处理当前候选的是、否、取消或编号。'
+        $script:notice='连续对话正在准备本地分句和识别。'
     }
 }
 
@@ -133,6 +137,7 @@ function Suspend-NoWakeConversation([string]$Reason) {
         'binding' { $script:notice='免唤醒已暂停：当前任务不可安全发送。' }
         'target-change' { $script:notice='免唤醒已暂停：任务连接正在改变。' }
         'create-pending' { $script:notice='免唤醒已暂停：新建请求仍待核对，或连接放弃状态不一致。' }
+        'secretary-busy' { }
     }
 }
 
@@ -151,9 +156,11 @@ function Start-NoWakeTranscription($Segment) {
     $script:noWakeAsrJob=@{Process=$proc;Purpose='no-wake-transcribe';Output=$resultPath;Files=@($resultPath,$resultTemporary,$wavePath);
         Generation=$script:noWakeGeneration;CaptureGeneration=$Segment.Generation;ThreadId=[string]$script:threadId;
         BindingGeneration=$script:bindingGeneration;Context=(Get-NoWakeContextSnapshot);
+        SecretaryGeneration=$script:secretaryGeneration;SecretarySessionId=$script:secretarySessionId;
         Evidence=@{DurationSeconds=$Segment.DurationSeconds;EndReason=$Segment.EndReason;Rms=$Segment.Rms;Peak=$Segment.Peak}}
     $script:noWakePhase='transcribing'
-    $script:notice='免唤醒正在本机试判；不会自动发送普通话语。'
+    if ($script:noWakeMode -eq 'conversation') { Set-SecretaryPhase 'transcribing' '正在把分句转成文字；音频不会发送到文本模型。' }
+    else { $script:notice='免唤醒正在本机试判；不会自动发送普通话语。' }
 }
 
 function Test-NoWakeContextStillCurrent($Snapshot) {
@@ -191,9 +198,15 @@ function Complete-NoWakeTranscription([DateTime]$Now) {
     try { $result=if (Test-Path -LiteralPath $job.Output) { Get-Content -LiteralPath $job.Output -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null } } catch { $result=$null }
     $code=$job.Process.ExitCode
     Close-Job $job
-    $stale=($job.Generation -ne $script:noWakeGeneration -or $job.CaptureGeneration -ne $job.Generation -or
-        $job.ThreadId -cne [string]$script:threadId -or
-        $job.BindingGeneration -ne $script:bindingGeneration -or $script:noWakeMode -eq 'off' -or $script:closing)
+    $stale=if($script:noWakeMode -eq 'conversation') {
+        ($job.Generation -ne $script:noWakeGeneration -or $job.CaptureGeneration -ne $job.Generation -or
+            $job.SecretaryGeneration -ne $script:secretaryGeneration -or $job.SecretarySessionId -cne $script:secretarySessionId -or
+            -not $script:continuousConversationEnabled -or $script:closing)
+    } else {
+        ($job.Generation -ne $script:noWakeGeneration -or $job.CaptureGeneration -ne $job.Generation -or
+            $job.ThreadId -cne [string]$script:threadId -or $job.BindingGeneration -ne $script:bindingGeneration -or
+            $script:noWakeMode -eq 'off' -or $script:closing)
+    }
     if ($code -ne 0 -or -not $result -or -not $result.ok -or $result.error) {
         if (-not $stale) {
             $script:noWakeLastError='本地试判转写失败。'
@@ -201,10 +214,23 @@ function Complete-NoWakeTranscription([DateTime]$Now) {
             $script:noWakePhase='error'
             $script:noWakeNextStartUtc=$Now.AddSeconds(10)
             $script:notice=$script:noWakeLastError+' 稍后会重新准备。'
+            if ($script:noWakeMode -eq 'conversation') { Set-SecretaryPhase 'error' '本地分句转写失败；本轮没有发送到文本模型。' }
         }
         return
     }
     $text=[string]$result.text
+    if ($script:noWakeMode -eq 'conversation') {
+        if ($stale) { return }
+        $script:noWakeJudgmentCount++
+        $script:noWakePhase='paused'
+        if (-not $text.Trim()) {
+            Set-SecretaryPhase 'listening' '没有听清这句，继续听取。'
+            $script:noWakeNextStartUtc=$Now.AddMilliseconds(500)
+            return
+        }
+        [void](Handle-SecretaryTranscript $text $Now)
+        return
+    }
     $context=$job.Context
     if ($context -and $context.Active -and (Test-NoWakeContextStillCurrent $context)) {
         $parsed=Get-NoWakeContextSnapshot $text
@@ -244,6 +270,7 @@ function Update-NoWakeConversation([DateTime]$Now=[DateTime]::UtcNow) {
         $script:noWakePhase='error'
         $script:noWakeNextStartUtc=$Now.AddSeconds(10)
         $script:notice='免唤醒采集暂不可用：'+$script:noWakeLastError
+        if ($script:noWakeMode -eq 'conversation') { Set-SecretaryPhase 'error' ('连续对话收音不可用：'+$script:noWakeLastError) }
         return
     }
     if (-not $script:noWakeCapture) {
@@ -254,16 +281,16 @@ function Update-NoWakeConversation([DateTime]$Now=[DateTime]::UtcNow) {
         }
         $captureId=[string]$script:mic.DefaultCaptureEndpointId
         $renderId=[string][CodexReader.AudioPlayer]::RenderEndpointId
-        if (-not $captureId -or -not $renderId) { $script:noWakePhase='error'; $script:notice='免唤醒需要可用的默认麦克风和朗读输出设备。'; return }
+        if (-not $captureId -or -not $renderId) { $script:noWakePhase='error'; $script:notice='连续对话需要可用的默认麦克风和朗读输出设备。'; if($script:noWakeMode -eq 'conversation'){Set-SecretaryPhase 'error' $script:notice}; return }
         $script:noWakeGeneration++
         $script:noWakeCapture=New-Object NoWakeCapture
-        try { $script:noWakeCapture.Start($captureId,$renderId,$script:noWakeGeneration); $script:noWakeLastError=''; $script:noWakePhase='observing' }
-        catch { $script:noWakeLastError=$_.Exception.Message; try { $script:noWakeCapture.Dispose() } catch {}; $script:noWakeCapture=$null; $script:noWakePhase='error'; $script:noWakeNextStartUtc=$Now.AddSeconds(10); $script:notice='免唤醒采集没有开始：'+$script:noWakeLastError; return }
+        try { $script:noWakeCapture.Start($captureId,$renderId,$script:noWakeGeneration); $script:noWakeLastError=''; $script:noWakePhase=if($script:noWakeMode -eq 'conversation'){'listening'}else{'observing'} }
+        catch { $script:noWakeLastError=$_.Exception.Message; try { $script:noWakeCapture.Dispose() } catch {}; $script:noWakeCapture=$null; $script:noWakePhase='error'; $script:noWakeNextStartUtc=$Now.AddSeconds(10); $script:notice='连续对话采集没有开始：'+$script:noWakeLastError; if($script:noWakeMode -eq 'conversation'){Set-SecretaryPhase 'error' $script:notice}; return }
     }
     if (-not $script:noWakeAsrJob) {
         $segment=$script:noWakeCapture.TryDequeueSegment()
         if ($segment) { Start-NoWakeTranscription $segment }
-        elseif ($script:noWakePhase -ne 'observing') { $script:noWakePhase='observing' }
+        elseif ($script:noWakePhase -notin @('observing','listening')) { $script:noWakePhase=if($script:noWakeMode -eq 'conversation'){'listening'}else{'observing'} }
     }
 }
 

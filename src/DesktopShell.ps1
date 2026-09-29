@@ -101,9 +101,9 @@ function Show-DesktopSettings {
 
 function Set-DesktopSettingsPage {
     param([hashtable]$Shell, [int]$Index=0)
-    $Index=[Math]::Max(0,[Math]::Min(2,$Index))
-    $pages=@('ConnectionPage','SoundPage','AppearancePage')
-    $titles=@('连接','声音','外观')
+    $Index=[Math]::Max(0,[Math]::Min(3,$Index))
+    $pages=@('ConnectionPage','SoundPage','ConversationPage','AppearancePage')
+    $titles=@('连接','声音','连续对话','外观')
     for($i=0;$i -lt $pages.Count;$i++) { $Shell.Controls[$pages[$i]].Visibility=if($i -eq $Index){'Visible'}else{'Collapsed'} }
     $Shell.Controls.SettingsPageTitle.Text=$titles[$Index]
     if($Shell.Controls.SettingsNavigation.SelectedIndex -ne $Index){$Shell.Controls.SettingsNavigation.SelectedIndex=$Index}
@@ -201,7 +201,7 @@ function New-DesktopShell {
     $menu.FontFamily = 'Microsoft YaHei UI'; $menu.FontSize = 13; $menu.Padding = '5'
     foreach ($entry in @(
         @('MenuPin','始终置顶',$true), @('MenuSettings','打开设置',$false),
-        @('MenuCaptions','显示字幕与输入',$true), @('MenuPauseResume','暂停朗读',$false), @('MenuStop','停止朗读',$false),
+        @('MenuCaptions','显示字幕与输入',$true), @('MenuConversation','开启连续对话',$true), @('MenuPauseResume','暂停朗读',$false), @('MenuStop','停止朗读',$false),
         @('MenuFollowUpEnd','结束连续接话',$false),
         @('MenuVisibility','隐藏悬浮声波',$false)
     )) {

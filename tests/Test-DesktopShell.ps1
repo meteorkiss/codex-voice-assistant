@@ -79,11 +79,11 @@ try {
     $shell.Controls.EchoStatusLabel.Text='回声消除已就绪，朗读中可喊“你好，声伴”。'
     [void](Render-Element $shell.SettingsWindow.Content 714 600 'settings' '#F5F5F7')
     [void](Render-Element $shell.SettingsWindow.Content 484 540 'settings-narrow' '#F5F5F7')
-    $pageKeys=@('ConnectionPage','SoundPage','AppearancePage');$pageNames=@('connection','sound','appearance');$pageTitles=@('连接','声音','外观')
-    for($pageIndex=0;$pageIndex -lt 3;$pageIndex++){
+    $pageKeys=@('ConnectionPage','SoundPage','ConversationPage','AppearancePage');$pageNames=@('connection','sound','conversation','appearance');$pageTitles=@('连接','声音','连续对话','外观')
+    for($pageIndex=0;$pageIndex -lt 4;$pageIndex++){
         $shell.Controls.SettingsNavigation.SelectedIndex=$pageIndex
         Assert-Ui ($shell.SettingsPage -eq $pageIndex -and $shell.Controls.SettingsPageTitle.Text -eq $pageTitles[$pageIndex]) ('navigation selects '+$pageNames[$pageIndex])
-        for($other=0;$other -lt 3;$other++){Assert-Ui (($shell.Controls[$pageKeys[$other]].Visibility -eq 'Visible') -eq ($other -eq $pageIndex)) ('page visibility '+$pageNames[$pageIndex]+'/'+$pageNames[$other])}
+        for($other=0;$other -lt 4;$other++){Assert-Ui (($shell.Controls[$pageKeys[$other]].Visibility -eq 'Visible') -eq ($other -eq $pageIndex)) ('page visibility '+$pageNames[$pageIndex]+'/'+$pageNames[$other])}
         [void](Render-Element $shell.SettingsWindow.Content 714 600 ('settings-'+$pageNames[$pageIndex]) '#F5F5F7')
         if($pageIndex -eq 1){
             # v0.6.17 adds the opt-in follow-up row; the scrollable page must

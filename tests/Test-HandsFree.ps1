@@ -748,9 +748,9 @@ try {
     $stuckNoWake | Add-Member ScriptMethod Stop { $this.Stops++ }
     $stuckNoWake | Add-Member ScriptMethod StopAndWait { param([int]$TimeoutMs) return $false }
     $stuckNoWake | Add-Member ScriptMethod Dispose { throw 'Timed-out capture must not be disposed early.' }
-    $script:noWakeMode='observe'; $script:noWakePhase='observing'; $script:noWakeCapture=$stuckNoWake; $script:noWakeAsrJob=$null
-    Set-NoWakeMode context
-    Assert-That ($script:noWakeMode -eq 'off' -and $script:noWakePhase -eq 'stopping' -and [object]::ReferenceEquals($script:noWakeCapture,$stuckNoWake)) 'A failed mode switch did not retain explicit no-wake ownership while failing closed.'
+    $script:noWakeMode='conversation'; $script:noWakePhase='listening'; $script:noWakeCapture=$stuckNoWake; $script:noWakeAsrJob=$null
+    Set-NoWakeMode off
+    Assert-That ($script:noWakeMode -eq 'off' -and $script:noWakePhase -eq 'stopping' -and [object]::ReferenceEquals($script:noWakeCapture,$stuckNoWake)) 'A failed conversation shutdown did not retain explicit capture ownership while failing closed.'
     Begin-Recording
     Assert-That ($script:recMode -eq 'idle' -and $script:noWakePhase -eq 'stopping' -and [object]::ReferenceEquals($script:noWakeCapture,$stuckNoWake)) 'Manual recording armed before a timed-out no-wake capture released its microphone.'
     $script:handsFreeEnabled=$true; $script:nextWakeUtc=[DateTime]::UtcNow.AddMilliseconds(-1)
