@@ -2,6 +2,7 @@
 
 function Sync-PendingSend {
     $script:pendingUncertain = if ($script:pendingSends.ContainsKey($script:threadId)) { [string]$script:pendingSends[$script:threadId].requestId } else { '' }
+    if (Get-Command Sync-SecretaryPendingSendStatus -ErrorAction SilentlyContinue) { [void](Sync-SecretaryPendingSendStatus) }
 }
 function Save-PendingSends {
     Write-AtomicJson -Path $script:pendingPath -Value @{version=1;sends=@($script:pendingSends.Values)} -Depth 8

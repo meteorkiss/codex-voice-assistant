@@ -1,5 +1,6 @@
 ﻿$ErrorActionPreference='Stop'
 $Root=Split-Path $PSScriptRoot -Parent
+. (Join-Path $Root 'src\PendingSends.ps1')
 . (Join-Path $Root 'src\SecretaryConversation.ps1')
 
 $checks=0
@@ -11,7 +12,8 @@ function Stop-NoWakeAsr {}
 function Close-Job($Job,[switch]$Kill){$script:closedJobs++}
 function Queue-AnswerSpeech([string]$Text){$script:queuedSpeech.Add($Text)}
 function Stop-AssistantOutput {}
-function Start-Worker { throw 'This unit test must not start a process.' }
+function Start-Worker { $script:startWorkerCalls++;throw 'This unit test must not start a process.' }
+function Remove-OwnedFiles {}
 function Invoke-TaskBindingCommit($Result,[string]$TargetThreadId,[scriptblock]$AfterApply=$null){
     $script:bindingCommits++
     if($script:bindingCommitFails){throw 'synthetic save failure'}
@@ -43,6 +45,34 @@ $script:ConversationStateLabel=[pscustomobject]@{Text=''}
 $script:ttsJob=$null;$script:speechQueue=New-Object 'Collections.Generic.Queue[string]';$script:audioPath=''
 $script:threadId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';$script:bindingGeneration=5
 $script:bindingCommits=0;$script:bindingCommitFails=$false;$script:sendCalls=0;$script:bridgeJob=$null
+$script:startWorkerCalls=0
+
+$restartRoot=Join-Path $Root ('work\tests\secretary-restart-'+[Guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($restartRoot)
+$script:runtime=$restartRoot;$script:pendingPath=Join-Path $restartRoot 'pending-sends.json';$script:pendingSends=@{};$script:pendingUncertain=''
+$restartRequest='99999999-9999-4999-8999-999999999999'
+@{version=1;sends=@(@{threadId=$script:threadId;requestId=$restartRequest;text='旧会话工作';createdUtc='2026-09-29T09:00:00Z'})}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $script:pendingPath -Encoding UTF8
+Initialize-PendingSends
+Initialize-SecretaryConversation
+Assert-Secretary ($script:pendingUncertain -ceq $restartRequest -and $null -eq $script:secretaryWork -and $script:secretaryOperationStatus -like '*结果未知*') 'Restarted pending ledger was overwritten by a no-operation secretary status.'
+Assert-Secretary (Start-SecretaryConversation -Now ([datetime]'2026-09-29T09:30:00Z')) 'Conversation UI could not start for the persisted-pending guard probe.'
+$restartTurn=Begin-SecretaryTurn '重启后模型请求' ([datetime]'2026-09-29T09:30:01Z')
+$restartTurn|Add-Member NoteProperty Snapshot (New-SecretaryCandidateSnapshot -Candidates @() -Turn $restartTurn -CatalogComplete $true -Now ([datetime]'2026-09-29T09:30:01Z'))
+$restartText=$script:ConversationBox.Text;$restartQueue=$script:queuedSpeech.Count
+Assert-Secretary (-not (Start-SecretaryModel $restartTurn) -and $script:startWorkerCalls -eq 0 -and $script:pendingUncertain -ceq $restartRequest) 'Persistent unknown send did not block the model worker before launch.'
+$restartReply=@{ok=$true;generation=$restartTurn.Generation;turnId=$restartTurn.TurnId;proposal=@{chatText='迟到的模型答复';clarification=$null;actionProposal=$null}}
+Assert-Secretary (-not (Complete-SecretaryModel $restartReply $restartTurn ([datetime]'2026-09-29T09:30:02Z')) -and $script:ConversationBox.Text -ceq $restartText -and $script:queuedSpeech.Count -eq $restartQueue) 'Persistent unknown send allowed a late model callback into UI or TTS.'
+Clear-PendingSend $script:threadId
+Assert-Secretary (-not $script:pendingUncertain -and $script:secretaryOperationStatus -like '*无待处理*') 'Explicit pending-ledger clearance did not resynchronize the authoritative local status.'
+$originalThread=$script:threadId;$pendingTarget='77777777-7777-4777-8777-777777777777';$pendingTargetRequest='88888888-8888-4888-8888-888888888888'
+Set-PendingSend @{threadId=$pendingTarget;requestId=$pendingTargetRequest;text='另一任务的待核对工作';createdUtc='2026-09-29T09:10:00Z'}
+$script:threadId=$pendingTarget;Sync-PendingSend
+Assert-Secretary ($script:pendingUncertain -ceq $pendingTargetRequest -and $script:secretaryOperationStatus -like '*结果未知*') 'Switching to a task with a persistent unknown send did not synchronize authoritative status.'
+Clear-PendingSend $pendingTarget
+Assert-Secretary (-not $script:pendingUncertain -and $script:secretaryOperationStatus -like '*无待处理*') 'Clearing the switched task ledger did not restore its local no-operation status.'
+$script:threadId=$originalThread;Sync-PendingSend
+if([IO.File]::Exists($script:pendingPath)){[IO.File]::Delete($script:pendingPath)}
+if([IO.Directory]::Exists($restartRoot)){[IO.Directory]::Delete($restartRoot,$false)}
 
 Initialize-SecretaryConversation
 Assert-Secretary ($script:secretaryPhase -eq 'off' -and $script:secretaryGeneration -eq 0) 'Secretary conversation did not default off.'

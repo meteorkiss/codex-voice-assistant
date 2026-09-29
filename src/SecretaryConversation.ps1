@@ -28,7 +28,7 @@ function Initialize-SecretaryConversation {
     $script:secretarySpeechGeneration=-1L
     $script:secretarySpeechObserved=$false
     $script:modelJob=$null
-    Set-SecretaryOperationStatus '本地操作状态：无待处理操作。'
+    [void](Sync-SecretaryPendingSendStatus -Initialize)
     Set-SecretaryConversationStatus '连续对话默认关闭。'
 }
 
@@ -44,6 +44,36 @@ function Set-SecretaryOperationStatus([string]$Text) {
     if (Get-Variable -Name ConversationOperationStatusLabel -Scope Script -ErrorAction SilentlyContinue) {
         if ($script:ConversationOperationStatusLabel) { $script:ConversationOperationStatusLabel.Text=$script:secretaryOperationStatus }
     }
+}
+
+function Get-SecretaryCurrentPendingSend {
+    if (-not (Get-Variable -Name pendingSends -Scope Script -ErrorAction SilentlyContinue) -or -not $script:pendingSends -or
+        -not (Get-Variable -Name threadId -Scope Script -ErrorAction SilentlyContinue) -or -not $script:threadId -or
+        -not $script:pendingSends.ContainsKey([string]$script:threadId)) { return $null }
+    return $script:pendingSends[[string]$script:threadId]
+}
+
+function Test-SecretaryPersistentPendingUnknown {
+    $pending=Get-SecretaryCurrentPendingSend
+    if (-not $pending) { return $false }
+    return [bool](-not $script:secretaryWork -or $script:secretaryWork.State -ne 'dispatching' -or
+        [string]$script:secretaryWork.RequestId -cne [string]$pending.requestId -or [string]$script:secretaryWork.ThreadId -cne [string]$script:threadId)
+}
+
+function Sync-SecretaryPendingSendStatus([switch]$Initialize) {
+    $pending=Get-SecretaryCurrentPendingSend
+    if ($pending) {
+        if (Test-SecretaryPersistentPendingUnknown) {
+            Set-SecretaryOperationStatus '发送结果未知，请到 Codex 核对；不会自动重派。'
+            return $true
+        }
+        Set-SecretaryOperationStatus ('正在等待《'+[string]$script:secretaryWork.Title+'》的真实接收回执…')
+        return $false
+    }
+    if ($script:secretaryWork -and $script:secretaryWork.State -eq 'unknown') { $script:secretaryWork.State='cleared' }
+    $sameWork=[bool]($script:secretaryWork -and [string]$script:secretaryWork.ThreadId -ceq [string]$script:threadId -and $script:secretaryWork.State -in @('accepted','rejected','dispatching'))
+    if ($Initialize -or -not $sameWork) { Set-SecretaryOperationStatus '本地操作状态：无待处理操作。' }
+    return $false
 }
 
 function Set-SecretaryPhase([string]$Phase,[string]$Message='') {
@@ -198,6 +228,11 @@ function Begin-SecretaryTurn([string]$Text,[DateTime]$Now=[DateTime]::UtcNow,[sw
 }
 
 function Start-SecretaryModel($Turn) {
+    if (Test-SecretaryPersistentPendingUnknown) {
+        [void](Sync-SecretaryPendingSendStatus)
+        Set-SecretaryPhase 'error' '上次发送结果仍待核对；本轮没有请求模型或重派。'
+        return $false
+    }
     if (-not $Turn -or $script:modelJob -or $Turn.SessionId -cne $script:secretarySessionId -or
         [long]$Turn.Generation -ne $script:secretaryGeneration -or $script:secretaryPhase -ne 'thinking' -or -not $Turn.Snapshot) { return $false }
     $id=[Guid]::NewGuid().ToString('N')
@@ -352,6 +387,7 @@ function Write-SecretaryReply([string]$Text,[switch]$LocalOnly) {
 }
 
 function Write-SecretaryModelReply([string]$Text) {
+    if (Test-SecretaryPersistentPendingUnknown) { [void](Sync-SecretaryPendingSendStatus);return $false }
     $clean=([string]$Text).Trim()
     if (-not $clean) { return $false }
     Write-SecretaryLine '模型答复（未执行操作）' $clean
@@ -368,6 +404,7 @@ function Write-SecretaryModelReply([string]$Text) {
 }
 
 function Complete-SecretaryModel($Result,$Turn,[DateTime]$Now=[DateTime]::UtcNow) {
+    if (Test-SecretaryPersistentPendingUnknown) { [void](Sync-SecretaryPendingSendStatus);return $false }
     if (-not $Turn -or $script:secretaryPhase -ne 'thinking' -or -not $script:continuousConversationEnabled -or
         $script:secretaryPendingConfirmation -or $script:secretaryAuthorizedAction -or ($script:secretaryWork -and $script:secretaryWork.State -in @('dispatching','unknown')) -or
         $Turn.SessionId -cne $script:secretarySessionId -or [long]$Turn.Generation -ne $script:secretaryGeneration -or
@@ -448,6 +485,11 @@ function Handle-SecretaryTranscript([string]$Text,[DateTime]$Now=[DateTime]::Utc
 }
 
 function Start-SecretaryCandidateList($Turn) {
+    if (Test-SecretaryPersistentPendingUnknown) {
+        [void](Sync-SecretaryPendingSendStatus)
+        Set-SecretaryPhase 'error' '上次发送结果仍待核对；本轮没有读取任务或请求模型。'
+        return $false
+    }
     if (-not $Turn -or $script:bridgeJob -or $Turn.SessionId -cne $script:secretarySessionId -or [long]$Turn.Generation -ne $script:secretaryGeneration) { return $false }
     try { $started=Start-Bridge @{action='list'} 'secretary-list' } catch { $started=$false }
     if (-not $started) { Set-SecretaryPhase 'error' '本机任务候选读取未能启动，没有发送模型请求。';return $false }
@@ -518,6 +560,7 @@ function Complete-SecretaryLiveAction($Result,$Action,[DateTime]$Now=[DateTime]:
     $script:secretaryWork=$work
     $script:bridgeJob.SecretaryWorkContext=$work.Clone()
     $script:secretaryAuthorizedAction=$null
+    Set-SecretaryOperationStatus ('正在等待《'+$Action.Title+'》的真实接收回执…')
     Set-SecretaryPhase 'thinking' ('正在等待《'+$Action.Title+'》的真实接收回执…')
     return $true
 }
