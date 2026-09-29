@@ -53,6 +53,7 @@ $turn=Begin-SecretaryTurn '请帮我看看' ([datetime]'2026-09-29T10:00:01Z')
 Assert-Secretary ($turn -and $script:secretaryPhase -eq 'thinking') 'Transcript did not begin a secretary turn.'
 Assert-Secretary ($script:InputBox.Text -ceq '保留的工作草稿') 'Conversation transcript overwrote the Codex work draft.'
 Assert-Secretary ($script:ConversationBox.Text.Contains('你：请帮我看看')) 'Transcript was not shown in the independent conversation area.'
+Assert-Secretary (@(Get-SecretaryModelHistory $turn.Transcript).Count -eq 0) 'Current transcript was duplicated inside recent model history.'
 
 $generation=$script:secretaryGeneration
 $turn|Add-Member NoteProperty Snapshot (New-SecretaryCandidateSnapshot -Candidates @() -Turn $turn -CatalogComplete $true -Now ([datetime]'2026-09-29T10:00:01Z'))
@@ -70,7 +71,7 @@ $turnNoTts|Add-Member NoteProperty Snapshot (New-SecretaryCandidateSnapshot -Can
 $script:conversationTtsConsent=$false;$beforeQueue=$script:queuedSpeech.Count
 $noTts=@{ok=$true;generation=$script:secretaryGeneration;turnId=$turnNoTts.TurnId;proposal=@{chatText='屏幕回复';clarification=$null;actionProposal=$null};snapshot=@();candidateCatalogComplete=$true}
 Assert-Secretary (Complete-SecretaryModel $noTts $turnNoTts ([datetime]'2026-09-29T10:00:06Z')) 'Display-only reply failed.'
-Assert-Secretary ($script:ConversationBox.Text.Contains('声伴：屏幕回复') -and $script:queuedSpeech.Count -eq $beforeQueue -and $script:secretaryPhase -eq 'listening') 'TTS=false did not preserve display while suppressing online speech.'
+Assert-Secretary ($script:ConversationBox.Text.Contains('模型答复（未执行操作）：屏幕回复') -and $script:queuedSpeech.Count -eq $beforeQueue -and $script:secretaryPhase -eq 'listening') 'TTS=false did not preserve the sourced model display while suppressing online speech.'
 $script:conversationTtsConsent=$true
 
 function New-TestSnapshot($ProposalTurn,[datetime]$Now){
@@ -107,6 +108,13 @@ foreach($bad in @(
     @{chatText=$null;clarification='';actionProposal=$null},
     @{chatText=$null;clarification=$null;actionProposal=@{action='stop';candidateKey=$null;workText=$null}}
 )){Assert-Secretary ($null -eq (Resolve-SecretaryProposal $bad $snapshot ([datetime]'2026-09-29T10:00:09Z'))) 'Invalid proposal crossed the local validator.'}
+$forgedSuccess=@{chatText='已交付给目标任务。';clarification=$null;actionProposal=$null}
+$forgedResolved=Resolve-SecretaryProposal $forgedSuccess $snapshot ([datetime]'2026-09-29T10:00:09Z')
+$operationBefore=$script:secretaryOperationStatus;$queueBeforeForged=$script:queuedSpeech.Count
+Assert-Secretary ($forgedResolved.Kind -eq 'chat' -and (Write-SecretaryModelReply $forgedResolved.Text)) 'Ordinary model prose did not stay in the sourced model channel.'
+Assert-Secretary ($script:secretaryOperationStatus -ceq $operationBefore -and $script:ConversationBox.Text.Contains('模型答复（未执行操作）：已交付给目标任务。') -and
+    -not $script:ConversationBox.Text.Contains('声伴状态：已交付给目标任务。') -and $script:queuedSpeech.Count -eq $queueBeforeForged+1 -and
+    $script:queuedSpeech[$script:queuedSpeech.Count-1].StartsWith('以下是模型答复，不代表已执行任务操作。')) 'Model prose overwrote or spoke as the authoritative local operation status.'
 $incomplete=New-SecretaryCandidateSnapshot -Candidates $snapshot.Candidates -Turn $proposalTurn -CatalogComplete $false -Now ([datetime]'2026-09-29T10:00:08Z')
 Assert-Secretary ($null -eq (Resolve-SecretaryProposal $valid $incomplete ([datetime]'2026-09-29T10:00:09Z'))) 'Incomplete candidate catalog authorized an action.'
 $missingTitle=New-SecretaryCandidateSnapshot -Candidates @([pscustomobject]@{threadId='22222222-2222-4222-8222-222222222222';title='';hostId='local'}) -Turn $proposalTurn -CatalogComplete $true -Now ([datetime]'2026-09-29T10:00:08Z')
@@ -116,13 +124,40 @@ $overLimit=New-SecretaryCandidateSnapshot -Candidates $tooMany -Turn $proposalTu
 Assert-Secretary (-not $overLimit.CatalogComplete -and @($overLimit.Candidates).Count -eq 40) 'Over-limit candidate catalog was not bounded and marked incomplete.'
 $remote=New-SecretaryCandidateSnapshot -Candidates @([pscustomobject]@{threadId='33333333-3333-4333-8333-333333333333';title='远端任务';hostId='remote'}) -Turn $proposalTurn -CatalogComplete $true -Now ([datetime]'2026-09-29T10:00:08Z')
 Assert-Secretary (-not $remote.CatalogComplete -and @($remote.Candidates).Count -eq 0) 'A non-local task entered the secretary action catalog.'
+$duplicateTitles=New-SecretaryCandidateSnapshot -Candidates @(
+    [pscustomobject]@{threadId='44444444-4444-4444-8444-444444444444';title='同名  任务';hostId='local'},
+    [pscustomobject]@{threadId='55555555-5555-4555-8555-555555555555';title='同名 任务';hostId='local'}
+) -Turn $proposalTurn -CatalogComplete $true -Now ([datetime]'2026-09-29T10:00:08Z')
+Assert-Secretary (-not $duplicateTitles.CatalogComplete) 'Duplicate normalized display titles left the action catalog complete.'
 
 $actionResult=@{ok=$true;generation=$script:secretaryGeneration;turnId=$proposalTurn.TurnId;proposal=$valid;snapshot=$snapshot.Candidates;candidateCatalogComplete=$true}
+$historyBeforeLocalPrompt=$script:secretaryHistory.Count
 Assert-Secretary (Complete-SecretaryModel $actionResult $proposalTurn ([datetime]'2026-09-29T10:00:09Z')) 'Valid action proposal did not create confirmation.'
 $pending=$script:secretaryPendingConfirmation
 Assert-Secretary ($pending -and $pending.Action -eq 'delegate_work' -and $pending.WorkText -ceq '检查回归') 'Action proposal bypassed or changed the local confirmation snapshot.'
+Assert-Secretary ($script:secretaryHistory.Count -eq $historyBeforeLocalPrompt) 'Local confirmation status leaked into model conversation history.'
+foreach($field in @('Action','CandidateKey','ThreadId','Title','WorkText','SessionId','ConversationGeneration','ProposalTurnId','SnapshotId','ExpiresAt','OriginalBindingGeneration')){
+    $mutated=$pending|ConvertTo-Json -Depth 14|ConvertFrom-Json
+    switch($field){
+        'Action'{$mutated.Action='switch_task'} 'CandidateKey'{$mutated.CandidateKey='cand_changed'} 'ThreadId'{$mutated.ThreadId='66666666-6666-4666-8666-666666666666'}
+        'Title'{$mutated.Title='改名任务'} 'WorkText'{$mutated.WorkText='篡改正文'} 'SessionId'{$mutated.SessionId=[Guid]::NewGuid().ToString('N')}
+        'ConversationGeneration'{$mutated.ConversationGeneration++} 'ProposalTurnId'{$mutated.ProposalTurnId='other-proposal'}
+        'SnapshotId'{$mutated.SnapshotId=[Guid]::NewGuid().ToString('N')} 'ExpiresAt'{$mutated.ExpiresAt='2026-09-29T09:00:00Z'}
+        'OriginalBindingGeneration'{$mutated.OriginalBindingGeneration++}
+    }
+    Assert-Secretary (-not (Test-SecretaryActionCurrent $mutated ([datetime]'2026-09-29T10:00:09Z'))) ('Mutable confirmation field crossed fingerprint validation: '+$field)
+}
+$tamperedPending=$pending|ConvertTo-Json -Depth 14|ConvertFrom-Json
+$tamperedPending.WorkText='篡改正文'
+$script:secretaryPendingConfirmation=$tamperedPending
+Assert-Secretary ((Consume-SecretaryConfirmation '是的' ([datetime]'2026-09-29T10:00:10Z')).Disposition -eq 'expired') 'Mutated pending work text was authorized by an unchanged candidate fingerprint.'
+$script:secretaryPendingConfirmation=$pending
 $confirm=Consume-SecretaryConfirmation '是的' ([datetime]'2026-09-29T10:00:10Z')
 Assert-Secretary ($confirm.Disposition -eq 'confirmed' -and $script:secretaryAuthorizedAction.SnapshotId -eq $pending.SnapshotId) 'Natural confirmation did not authorize the exact proposal snapshot once.'
+Assert-Secretary ($script:secretaryAuthorizedAction.ConfirmationTurnId -and $script:secretaryAuthorizedAction.ConfirmationTurnId -cne $script:secretaryAuthorizedAction.ProposalTurnId) 'Confirmation did not bind an independent confirmation turn ID.'
+$mutatedConfirmed=$script:secretaryAuthorizedAction|ConvertTo-Json -Depth 14|ConvertFrom-Json
+$mutatedConfirmed.ConfirmationTurnId=[Guid]::NewGuid().ToString('N')
+Assert-Secretary (-not (Test-SecretaryActionCurrent $mutatedConfirmed ([datetime]'2026-09-29T10:00:10Z') -RequireConfirmation)) 'Mutated confirmation turn crossed the complete action fingerprint.'
 Assert-Secretary ((Consume-SecretaryConfirmation '是的' ([datetime]'2026-09-29T10:00:11Z')).Disposition -eq 'none') 'A confirmation replay authorized an already-consumed snapshot.'
 $script:secretaryPendingConfirmation=$pending
 Pause-SecretaryConversation '暂停'
@@ -135,6 +170,8 @@ $switchSnapshot=New-TestSnapshot $switchTurn ([datetime]'2026-09-29T10:00:15Z')
 $switchProposal=@{chatText=$null;clarification=$null;actionProposal=@{action='switch_task';candidateKey='cand_random_token';workText=$null}}
 $switchAction=Resolve-SecretaryProposal $switchProposal $switchSnapshot ([datetime]'2026-09-29T10:00:16Z')
 Assert-Secretary ($switchAction -and (Test-SecretarySnapshotCurrent $switchSnapshot ([datetime]'2026-09-29T10:00:16Z'))) 'Valid switch proposal did not resolve against its fresh snapshot.'
+$script:secretaryPendingConfirmation=$switchAction
+$switchAction=(Consume-SecretaryConfirmation '是的' ([datetime]'2026-09-29T10:00:16Z')).Action
 $live=[pscustomobject]@{ok=$true;threadId=$switchAction.ThreadId;title='目标任务';archived=$false;bindingState='active';hostId='local';rolloutPath='synthetic'}
 $beforeText=$script:ConversationBox.Text
 Assert-Secretary (Complete-SecretaryLiveAction $live $switchAction ([datetime]'2026-09-29T10:00:17Z')) 'Valid switch did not commit.'
@@ -157,6 +194,8 @@ Set-SecretaryPhase 'listening' 'synthetic delegate setup'
 $delegateTurn=Begin-SecretaryTurn '委派工作' ([datetime]'2026-09-29T10:00:20Z')
 $delegateSnapshot=New-TestSnapshot $delegateTurn ([datetime]'2026-09-29T10:00:21Z')
 $delegateAction=Resolve-SecretaryProposal $valid $delegateSnapshot ([datetime]'2026-09-29T10:00:22Z')
+$script:secretaryPendingConfirmation=$delegateAction
+$delegateAction=(Consume-SecretaryConfirmation '是的' ([datetime]'2026-09-29T10:00:22Z')).Action
 $live.title='目标任务';$beforeText=$script:ConversationBox.Text
 Assert-Secretary ($delegateAction) 'Delegate proposal did not resolve.'
 Assert-Secretary (Test-SecretarySnapshotCurrent $delegateAction.Snapshot ([datetime]'2026-09-29T10:00:23Z')) 'Delegate snapshot was not current.'
@@ -165,6 +204,9 @@ Assert-Secretary (Test-SecretaryLiveCandidate $delegateAction $live) 'Delegate l
 Assert-Secretary (Complete-SecretaryLiveAction $live $delegateAction ([datetime]'2026-09-29T10:00:23Z')) ('Valid delegate did not reach Send-Text: '+$script:secretaryStatus)
 Assert-Secretary ($script:sendCalls -eq 1 -and $script:bridgeJob.Request.text -ceq '检查回归' -and $script:secretaryWork.State -eq 'dispatching') 'Delegate changed work text or bypassed the unique send route.'
 Assert-Secretary (-not $script:ConversationBox.Text.Substring($beforeText.Length).Contains('已交付')) 'Delegate claimed success before accepted receipt.'
+$oldModelText=$script:ConversationBox.Text;$oldModelQueue=$script:queuedSpeech.Count
+$duplicateModel=@{ok=$true;generation=$delegateTurn.Generation;turnId=$delegateTurn.TurnId;proposal=@{chatText='这是迟到的模型文本';clarification=$null;actionProposal=$null}}
+Assert-Secretary (-not (Complete-SecretaryModel $duplicateModel $delegateTurn ([datetime]'2026-09-29T10:00:23Z')) -and $script:ConversationBox.Text -ceq $oldModelText -and $script:queuedSpeech.Count -eq $oldModelQueue) 'Dispatching work accepted a late model callback into UI or TTS.'
 $job=$script:bridgeJob;$script:bridgeJob=$null
 [void](Complete-SecretaryWorkReceipt $job 'accepted')
 Assert-Secretary ($script:secretaryWork.State -eq 'accepted' -and $script:ConversationBox.Text.Contains('已交付给《目标任务》')) 'Accepted receipt did not produce local delivery success.'
@@ -186,6 +228,27 @@ $old=$script:secretaryGeneration
 Pause-SecretaryConversation '用户立即暂停'
 Assert-Secretary ($script:secretaryPhase -eq 'paused' -and $script:secretaryGeneration -gt $old) 'Pause did not invalidate outstanding callbacks.'
 Assert-Secretary (-not (Complete-SecretaryModel $reply $turn ([datetime]'2026-09-29T11:00:01Z'))) 'A late model result revived a paused conversation.'
+$lateContext=@{RequestId='late-accepted';ThreadId='11111111-1111-4111-8111-111111111111';Title='目标任务';WorkText='旧工作';State='dispatching';SessionId=$script:secretarySessionId;Generation=$old}
+$script:secretaryWork=$lateContext.Clone();$lateJob=@{SecretaryWorkContext=$lateContext.Clone()};$queueBeforeLate=$script:queuedSpeech.Count
+[void](Complete-SecretaryWorkReceipt $lateJob 'accepted')
+Assert-Secretary ($script:secretaryWork.State -eq 'accepted' -and $script:secretaryPhase -eq 'paused' -and $script:queuedSpeech.Count -eq $queueBeforeLate) 'Late accepted receipt revived or spoke inside a paused conversation.'
+$inactiveGeneration=$script:secretaryGeneration
+foreach($case in @(
+    @{Phase='off';Enabled=$false;Receipt='rejected'},
+    @{Phase='error';Enabled=$true;Receipt='unknown'},
+    @{Phase='paused';Enabled=$true;Receipt='accepted'}
+)){
+    $script:secretaryPhase=$case.Phase;$script:continuousConversationEnabled=$case.Enabled;$script:noWakeMode='off'
+    $ctx=@{RequestId=([Guid]::NewGuid().ToString('N'));ThreadId='11111111-1111-4111-8111-111111111111';Title='目标任务';WorkText='迟到工作';State='dispatching';SessionId=$script:secretarySessionId;Generation=$inactiveGeneration}
+    $script:secretaryWork=$ctx.Clone();$inactiveJob=@{SecretaryWorkContext=$ctx.Clone()};$inactiveQueue=$script:queuedSpeech.Count
+    [void](Complete-SecretaryWorkReceipt $inactiveJob $case.Receipt)
+    Assert-Secretary ($script:secretaryPhase -ceq $case.Phase -and $script:noWakeMode -eq 'off' -and $script:queuedSpeech.Count -eq $inactiveQueue) ('Inactive receipt changed phase, capture or TTS: '+$case.Phase+'/'+$case.Receipt)
+}
+$script:secretaryPhase='listening';$script:continuousConversationEnabled=$true;$oldSession=[Guid]::NewGuid().ToString('N')
+$newSessionContext=@{RequestId='old-session-unknown';ThreadId='11111111-1111-4111-8111-111111111111';Title='目标任务';WorkText='旧会话工作';State='dispatching';SessionId=$oldSession;Generation=$script:secretaryGeneration}
+$script:secretaryWork=$newSessionContext.Clone();$newSessionJob=@{SecretaryWorkContext=$newSessionContext.Clone()};$newSessionQueue=$script:queuedSpeech.Count
+[void](Complete-SecretaryWorkReceipt $newSessionJob 'unknown')
+Assert-Secretary ($script:secretaryPhase -eq 'listening' -and $script:queuedSpeech.Count -eq $newSessionQueue) 'A prior-session receipt changed the new session phase or TTS.'
 [void](Resume-SecretaryConversation -Now ([datetime]'2026-09-29T11:00:02Z'))
 $script:secretaryIdleDeadlineUtc=[datetime]'2026-09-29T11:00:03Z'
 Update-SecretaryConversation ([datetime]'2026-09-29T11:00:04Z')

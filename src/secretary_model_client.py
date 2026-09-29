@@ -12,13 +12,11 @@ import ipaddress
 import json
 import os
 import re
-import secrets
 import socket
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from pathlib import Path
 
 
@@ -97,38 +95,11 @@ def _clean_title(value) -> str:
     return value[:MAX_TITLE_CHARS]
 
 
-def _candidate_snapshot(listing: dict) -> tuple[list[dict], list[dict], bool]:
-    if not isinstance(listing, dict) or not isinstance(listing.get("threads"), list):
-        raise ClientError("candidate_catalog_unavailable", "本机任务候选暂时不可用。")
-    complete = not bool(listing.get("warning")) and int(listing.get("missingTitleCount") or 0) == 0
-    if len(listing["threads"]) > MAX_CANDIDATES:
-        complete = False
-    cloud, local, seen = [], [], set()
-    for item in listing["threads"][:MAX_CANDIDATES]:
-        if not isinstance(item, dict) or item.get("hostId") != "local":
-            complete = False
-            continue
-        try:
-            thread_id = str(uuid.UUID(str(item.get("threadId"))))
-        except (ValueError, TypeError, AttributeError):
-            complete = False
-            continue
-        title = _clean_title(item.get("title"))
-        if not title or thread_id in seen:
-            complete = False
-            continue
-        seen.add(thread_id)
-        key = "cand_" + secrets.token_urlsafe(18)
-        cloud.append({"candidateKey": key, "displayName": title})
-        local.append({"candidateKey": key, "threadId": thread_id, "title": title})
-    return cloud, local, complete
-
-
 def _provided_candidates(value, declared_complete) -> tuple[list[dict], list[dict], bool]:
     if not isinstance(value, list):
         raise ClientError("candidate_catalog_unavailable", "本轮任务候选快照无效。")
     complete = declared_complete is True and len(value) <= MAX_CANDIDATES
-    cloud, seen = [], set()
+    cloud, seen, titles = [], set(), set()
     for item in value[:MAX_CANDIDATES]:
         if not isinstance(item, dict) or set(item) != {"candidateKey", "displayName"}:
             complete = False
@@ -138,6 +109,9 @@ def _provided_candidates(value, declared_complete) -> tuple[list[dict], list[dic
             complete = False
             continue
         seen.add(key)
+        if title in titles:
+            complete = False
+        titles.add(title)
         cloud.append({"candidateKey": key, "displayName": title})
     # Production-provided mappings stay in the PowerShell process.  This
     # worker sees and returns opaque keys/display names only, never task IDs.
@@ -298,13 +272,9 @@ def handle_request(request: dict, environ=None, candidate_loader=None) -> dict:
             raise ClientError("timeout_invalid", "模型超时设置无效。")
         if timeout < 0.05 or timeout > 60:
             raise ClientError("timeout_invalid", "模型超时须在 0.05 到 60 秒之间。")
-        if "candidates" in request:
-            cloud_candidates, snapshot, catalog_complete = _provided_candidates(request.get("candidates"), request.get("candidateCatalogComplete"))
-        else:
-            if candidate_loader is None:
-                from codex_bridge import list_tasks
-                candidate_loader = list_tasks
-            cloud_candidates, snapshot, catalog_complete = _candidate_snapshot(candidate_loader())
+        if "candidates" not in request:
+            raise ClientError("candidate_catalog_unavailable", "本轮缺少本地生成的最小任务候选快照。")
+        cloud_candidates, snapshot, catalog_complete = _provided_candidates(request.get("candidates"), request.get("candidateCatalogComplete"))
         payload = _payload(model.strip(), transcript.strip(), _history(request.get("history")), cloud_candidates, catalog_complete)
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(body) > MAX_REQUEST_BYTES:

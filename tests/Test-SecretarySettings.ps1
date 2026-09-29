@@ -24,9 +24,15 @@ try {
     $saved=Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8|ConvertFrom-Json
     Assert-SecretarySettings ($saved.version -eq 9 -and $saved.noWakeMode -eq 'off' -and -not $saved.continuousConversationEnabled) 'Settings did not persist the v9 safe-off contract.'
     Assert-SecretarySettings ($null -eq $saved.apiKey -and $saved.modelCredentialEnv -ceq 'SHENGBAN_KEY') 'Settings persisted a credential value instead of only its environment variable reference.'
+    @{version=9;modelAuthMode='none';modelCredentialEnv='SHOULD_BE_CLEARED'}|ConvertTo-Json|Set-Content -LiteralPath $settingsPath -Encoding UTF8
+    Reset-State;Initialize-AssistantSettings;Save-Settings
+    $noAuth=Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8|ConvertFrom-Json
+    Assert-SecretarySettings ($script:modelAuthMode -eq 'none' -and [string]::IsNullOrEmpty([string]$script:modelCredentialEnv) -and [string]::IsNullOrEmpty([string]$noAuth.modelCredentialEnv)) 'Loopback no-auth mode retained a stale credential reference.'
     [xml]$xaml=Get-Content -LiteralPath (Join-Path $Root 'src\SettingsWindow.xaml') -Raw -Encoding UTF8
     $names=@($xaml.SelectNodes('//*[@Name]')|ForEach-Object{$_.Name})
     foreach($name in @('ContinuousConversationToggle','ModelEndpointBox','ModelNameBox','ModelAuthModeCombo','ModelCredentialEnvBox','ModelDataConsentToggle','ConversationTtsConsentToggle','ConversationIdleBox','ConversationMaxTurnsBox')){Assert-SecretarySettings ($names -contains $name) ('Missing conversation setting control: '+$name)}
+    [xml]$caption=Get-Content -LiteralPath (Join-Path $Root 'src\CaptionWindow.xaml') -Raw -Encoding UTF8
+    Assert-SecretarySettings ($null -ne $caption.SelectSingleNode('//*[@Name="ConversationOperationStatusLabel"]')) 'Missing independent local operation-status view.'
     $launcher=[IO.File]::ReadAllText((Join-Path $Root 'src\Launcher.cs'))
     foreach($file in @('SecretaryConversation.ps1','secretary_model_client.py')){Assert-SecretarySettings ($launcher.Contains($file)) ('Launcher dependency missing: '+$file)}
 } finally {

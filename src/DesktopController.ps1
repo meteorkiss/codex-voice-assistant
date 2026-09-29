@@ -14,7 +14,9 @@ function Sync-ConversationSettingsFromControls {
         $script:modelEndpoint=$desktop.Controls.ModelEndpointBox.Text.Trim()
         $script:modelName=$desktop.Controls.ModelNameBox.Text.Trim()
         if ($desktop.Controls.ModelAuthModeCombo.SelectedItem) { $script:modelAuthMode=[string]$desktop.Controls.ModelAuthModeCombo.SelectedItem.id }
-        $script:modelCredentialEnv=$desktop.Controls.ModelCredentialEnvBox.Text.Trim()
+        $script:modelCredentialEnv=if($script:modelAuthMode -eq 'none'){''}else{$desktop.Controls.ModelCredentialEnvBox.Text.Trim()}
+        $desktop.Controls.ModelCredentialEnvBox.Text=[string]$script:modelCredentialEnv
+        $desktop.Controls.ModelCredentialEnvBox.IsEnabled=($script:modelAuthMode -eq 'bearer')
         $script:modelDataConsent=[bool]$desktop.Controls.ModelDataConsentToggle.IsChecked
         $script:conversationTtsConsent=[bool]$desktop.Controls.ConversationTtsConsentToggle.IsChecked
         $number=0
@@ -213,6 +215,7 @@ function Sync-DesktopPreferences {
             $desktop.Controls.ModelEndpointBox.Text=[string]$script:modelEndpoint
             $desktop.Controls.ModelNameBox.Text=[string]$script:modelName
             $desktop.Controls.ModelCredentialEnvBox.Text=[string]$script:modelCredentialEnv
+            $desktop.Controls.ModelCredentialEnvBox.IsEnabled=($script:modelAuthMode -eq 'bearer')
             $desktop.Controls.ModelDataConsentToggle.IsChecked=[bool]$script:modelDataConsent
             $desktop.Controls.ConversationTtsConsentToggle.IsChecked=[bool]$script:conversationTtsConsent
             $desktop.Controls.ConversationIdleBox.Text=[string]$script:conversationIdleSeconds

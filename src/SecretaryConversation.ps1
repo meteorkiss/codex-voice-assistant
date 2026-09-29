@@ -12,6 +12,7 @@ $script:secretarySpeechGeneration=-1L
 $script:secretarySpeechObserved=$false
 $script:secretaryWork=$null
 $script:modelJob=$null
+$script:secretaryOperationStatus='本地操作状态：无待处理操作。'
 
 function Initialize-SecretaryConversation {
     $script:secretaryPhase='off'
@@ -27,6 +28,7 @@ function Initialize-SecretaryConversation {
     $script:secretarySpeechGeneration=-1L
     $script:secretarySpeechObserved=$false
     $script:modelJob=$null
+    Set-SecretaryOperationStatus '本地操作状态：无待处理操作。'
     Set-SecretaryConversationStatus '连续对话默认关闭。'
 }
 
@@ -35,6 +37,13 @@ function Set-SecretaryConversationStatus([string]$Text) {
         if ($script:ConversationStateLabel) { $script:ConversationStateLabel.Text=$Text }
     }
     $script:secretaryStatus=$Text
+}
+
+function Set-SecretaryOperationStatus([string]$Text) {
+    $script:secretaryOperationStatus=([string]$Text).Trim()
+    if (Get-Variable -Name ConversationOperationStatusLabel -Scope Script -ErrorAction SilentlyContinue) {
+        if ($script:ConversationOperationStatusLabel) { $script:ConversationOperationStatusLabel.Text=$script:secretaryOperationStatus }
+    }
 }
 
 function Set-SecretaryPhase([string]$Phase,[string]$Message='') {
@@ -162,6 +171,15 @@ function Add-SecretaryHistory([string]$Role,[string]$Content) {
     while ($script:secretaryHistory.Count -gt 8) { $script:secretaryHistory.RemoveAt(0) }
 }
 
+function Get-SecretaryModelHistory([string]$CurrentTranscript) {
+    $items=@($script:secretaryHistory.ToArray())
+    if ($items.Count -gt 0 -and [string]$items[$items.Count-1].role -ceq 'user' -and [string]$items[$items.Count-1].content -ceq $CurrentTranscript.Trim()) {
+        if ($items.Count -eq 1) { return @() }
+        return @($items[0..($items.Count-2)])
+    }
+    return $items
+}
+
 function Begin-SecretaryTurn([string]$Text,[DateTime]$Now=[DateTime]::UtcNow,[switch]$AlreadyDisplayed,[switch]$AlreadyCounted) {
     if (-not $script:continuousConversationEnabled -or $script:secretaryPhase -ne 'listening') { return $null }
     $text=$Text.Trim()
@@ -187,7 +205,7 @@ function Start-SecretaryModel($Turn) {
     $outputPath=Join-Path $runtime ($id+'.secretary-result.json')
     $request=[ordered]@{endpoint=$script:modelEndpoint;model=$script:modelName;authMode=$script:modelAuthMode;
         credentialEnv=$script:modelCredentialEnv;consent=[bool]$script:modelDataConsent;timeoutSeconds=20;
-        transcript=$Turn.Transcript;history=@($script:secretaryHistory);generation=$Turn.Generation;turnId=$Turn.TurnId;
+        transcript=$Turn.Transcript;history=@(Get-SecretaryModelHistory $Turn.Transcript);generation=$Turn.Generation;turnId=$Turn.TurnId;
         candidateCatalogComplete=[bool]$Turn.Snapshot.CatalogComplete;candidates=@($Turn.Snapshot.Candidates|ForEach-Object{[ordered]@{candidateKey=$_.candidateKey;displayName=$_.title}})}
     try {
         [IO.File]::WriteAllText($inputPath,($request|ConvertTo-Json -Depth 8),(New-Object Text.UTF8Encoding($false)))
@@ -230,15 +248,23 @@ function New-SecretaryOpaqueKey {
     return 'cand_'+[Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
 }
 
+function ConvertTo-SecretaryCandidateTitle($Value) {
+    $title=([string]$Value).Trim()
+    if (-not $title -or $title.Length -gt 120 -or $title -match '[\x00-\x1f\x7f-\x9f]') { return '' }
+    return [Text.RegularExpressions.Regex]::Replace($title,'\s+',' ')
+}
+
 function New-SecretaryCandidateSnapshot {
     param($Candidates,$Turn,[bool]$CatalogComplete,[DateTime]$Now=[DateTime]::UtcNow)
-    $normalized=New-Object 'Collections.Generic.List[object]';$keys=New-Object 'Collections.Generic.HashSet[string]';$ids=New-Object 'Collections.Generic.HashSet[string]'
+    $normalized=New-Object 'Collections.Generic.List[object]';$keys=New-Object 'Collections.Generic.HashSet[string]';$ids=New-Object 'Collections.Generic.HashSet[string]';$titles=New-Object 'Collections.Generic.List[string]'
     $complete=$CatalogComplete
     foreach($candidate in @($Candidates)){
-        $id=[Guid]::Empty;$key=[string]$candidate.candidateKey;if(-not $key){$key=New-SecretaryOpaqueKey};$title=([string]$candidate.title).Trim()
+        $id=[Guid]::Empty;$key=[string]$candidate.candidateKey;if(-not $key){$key=New-SecretaryOpaqueKey};$title=ConvertTo-SecretaryCandidateTitle $candidate.title
         $local=($null -eq $candidate.PSObject.Properties['hostId'] -or [string]$candidate.hostId -eq 'local')
         if (-not $key -or -not $keys.Add($key) -or -not [Guid]::TryParse([string]$candidate.threadId,[ref]$id) -or
-            -not $ids.Add($id.ToString()) -or -not $local -or -not $title -or $title.Length -gt 120 -or $title -match '[\x00-\x1f\x7f-\x9f]') { $complete=$false;continue }
+            -not $ids.Add($id.ToString()) -or -not $local -or -not $title) { $complete=$false;continue }
+        if ($titles.Contains($title)) { $complete=$false }
+        else { [void]$titles.Add($title) }
         [void]$normalized.Add([pscustomobject]@{candidateKey=$key;threadId=$id.ToString();title=$title})
     }
     if ($normalized.Count -gt 40) { $complete=$false; while($normalized.Count -gt 40){$normalized.RemoveAt($normalized.Count-1)} }
@@ -247,6 +273,34 @@ function New-SecretaryCandidateSnapshot {
         OriginalBindingGeneration=[long]$script:bindingGeneration;CatalogComplete=[bool]$complete;Candidates=$normalized.ToArray();Fingerprint=''}
     $snapshot.Fingerprint=Get-SecretarySnapshotFingerprint $snapshot
     return $snapshot
+}
+
+function Get-SecretaryActionFingerprint($Action) {
+    $canonical=[ordered]@{SessionId=[string]$Action.SessionId;ConversationGeneration=[long]$Action.ConversationGeneration;
+        ProposalTurnId=[string]$Action.ProposalTurnId;ConfirmationTurnId=[string]$Action.ConfirmationTurnId;
+        SnapshotId=[string]$Action.SnapshotId;ExpiresAt=[string]$Action.ExpiresAt;OriginalBindingGeneration=[long]$Action.OriginalBindingGeneration;
+        Action=[string]$Action.Action;CandidateKey=[string]$Action.CandidateKey;ThreadId=[string]$Action.ThreadId;
+        Title=[string]$Action.Title;WorkText=if($null -eq $Action.WorkText){$null}else{[string]$Action.WorkText};
+        CandidateSnapshotFingerprint=[string]$Action.Snapshot.Fingerprint}
+    $bytes=[Text.Encoding]::UTF8.GetBytes(($canonical|ConvertTo-Json -Depth 8 -Compress))
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+
+function Test-SecretaryActionCurrent($Action,[DateTime]$Now=[DateTime]::UtcNow,[switch]$RequireConfirmation) {
+    $names=@('Kind','Action','CandidateKey','ThreadId','Title','WorkText','SessionId','ConversationGeneration','ProposalTurnId','ConfirmationTurnId','SnapshotId','ExpiresAt','OriginalBindingGeneration','Snapshot','Fingerprint')
+    if (-not $Action -or -not (Test-SecretaryExactProperties $Action $names) -or -not (Test-SecretarySnapshotCurrent $Action.Snapshot $Now)) { return $false }
+    if ([string]$Action.Kind -cne 'action' -or [string]$Action.Action -notin @('switch_task','delegate_work') -or
+        [string]$Action.SessionId -cne [string]$Action.Snapshot.SessionId -or [long]$Action.ConversationGeneration -ne [long]$Action.Snapshot.ConversationGeneration -or
+        [string]$Action.ProposalTurnId -cne [string]$Action.Snapshot.ProposalTurnId -or [string]$Action.SnapshotId -cne [string]$Action.Snapshot.SnapshotId -or
+        [string]$Action.ExpiresAt -cne [string]$Action.Snapshot.ExpiresAt -or [long]$Action.OriginalBindingGeneration -ne [long]$Action.Snapshot.OriginalBindingGeneration) { return $false }
+    if ($RequireConfirmation) {
+        $confirm=[Guid]::Empty
+        if (-not [Guid]::TryParse([string]$Action.ConfirmationTurnId,[ref]$confirm) -or [string]$Action.ConfirmationTurnId -ceq [string]$Action.ProposalTurnId) { return $false }
+    } elseif (-not [string]::IsNullOrEmpty([string]$Action.ConfirmationTurnId)) { return $false }
+    $matches=@($Action.Snapshot.Candidates|Where-Object{$_.candidateKey -ceq [string]$Action.CandidateKey -and $_.threadId -ceq [string]$Action.ThreadId -and $_.title -ceq [string]$Action.Title})
+    if ($matches.Count -ne 1) { return $false }
+    return ([string]$Action.Fingerprint -ceq (Get-SecretaryActionFingerprint $Action))
 }
 
 function Test-SecretarySnapshotCurrent($Snapshot,[DateTime]$Now=[DateTime]::UtcNow) {
@@ -273,56 +327,91 @@ function Resolve-SecretaryProposal($Proposal,$Snapshot,[DateTime]$Now=[DateTime]
     if ($action.action -eq 'delegate_work' -and ($action.workText -isnot [string] -or [string]::IsNullOrWhiteSpace($action.workText) -or $action.workText.Length -gt 6000)) { return $null }
     $matches=@($Snapshot.Candidates|Where-Object{$_.candidateKey -ceq [string]$action.candidateKey})
     if ($matches.Count -ne 1) { return $null }
-    return [pscustomobject]@{Kind='action';Action=[string]$action.action;CandidateKey=[string]$action.candidateKey;
+    $resolved=[pscustomobject]@{Kind='action';Action=[string]$action.action;CandidateKey=[string]$action.candidateKey;
         ThreadId=[string]$matches[0].threadId;Title=[string]$matches[0].title;WorkText=if($null -eq $action.workText){$null}else{[string]$action.workText};
-        SessionId=$Snapshot.SessionId;ConversationGeneration=$Snapshot.ConversationGeneration;ProposalTurnId=$Snapshot.ProposalTurnId;
-        SnapshotId=$Snapshot.SnapshotId;ExpiresAt=$Snapshot.ExpiresAt;OriginalBindingGeneration=$Snapshot.OriginalBindingGeneration;Snapshot=$Snapshot}
+        SessionId=$Snapshot.SessionId;ConversationGeneration=$Snapshot.ConversationGeneration;ProposalTurnId=$Snapshot.ProposalTurnId;ConfirmationTurnId='';
+        SnapshotId=$Snapshot.SnapshotId;ExpiresAt=$Snapshot.ExpiresAt;OriginalBindingGeneration=$Snapshot.OriginalBindingGeneration;Snapshot=$Snapshot;Fingerprint=''}
+    $resolved.Fingerprint=Get-SecretaryActionFingerprint $resolved
+    if (-not (Test-SecretaryActionCurrent $resolved $Now)) { return $null }
+    return $resolved
 }
 
 function Write-SecretaryReply([string]$Text,[switch]$LocalOnly) {
-    Write-SecretaryLine '声伴' $Text
-    Add-SecretaryHistory 'assistant' $Text
-    if (-not $LocalOnly -and $script:conversationTtsConsent -eq $true -and $script:continuousConversationEnabled -and $script:secretaryPhase -ne 'off') {
+    Set-SecretaryOperationStatus $Text
+    Write-SecretaryLine '声伴状态' $Text
+    if (-not $LocalOnly -and $script:conversationTtsConsent -eq $true -and $script:continuousConversationEnabled -and $script:secretaryPhase -notin @('off','paused','error')) {
         if (Get-Command Stop-AssistantOutput -ErrorAction SilentlyContinue) { Stop-AssistantOutput }
         Queue-AnswerSpeech $Text
         $script:secretarySpeechGeneration=$script:secretaryGeneration
         $script:secretarySpeechObserved=$false
         Set-SecretaryPhase 'speaking' '声伴正在说话；收音已暂停。'
-    } elseif ($script:continuousConversationEnabled -and $script:secretaryPhase -ne 'paused') {
+    } elseif ($script:continuousConversationEnabled -and $script:secretaryPhase -notin @('off','paused','error')) {
         Set-SecretaryPhase 'listening' '连续对话正在听。'
         if (-not (Set-SecretaryCaptureMode conversation)) { Set-SecretaryPhase 'error' '连续收音未能恢复；本轮保持停止。' }
     }
 }
 
+function Write-SecretaryModelReply([string]$Text) {
+    $clean=([string]$Text).Trim()
+    if (-not $clean) { return $false }
+    Write-SecretaryLine '模型答复（未执行操作）' $clean
+    Add-SecretaryHistory 'assistant' $clean
+    if ($script:conversationTtsConsent -eq $true -and $script:continuousConversationEnabled -and $script:secretaryPhase -eq 'thinking' -and
+        -not $script:secretaryPendingConfirmation -and (-not $script:secretaryWork -or $script:secretaryWork.State -notin @('dispatching','unknown'))) {
+        if (Get-Command Stop-AssistantOutput -ErrorAction SilentlyContinue) { Stop-AssistantOutput }
+        Queue-AnswerSpeech ('以下是模型答复，不代表已执行任务操作。'+$clean)
+        $script:secretarySpeechGeneration=$script:secretaryGeneration
+        $script:secretarySpeechObserved=$false
+        return $true
+    }
+    return $false
+}
+
 function Complete-SecretaryModel($Result,$Turn,[DateTime]$Now=[DateTime]::UtcNow) {
     if (-not $Turn -or $script:secretaryPhase -ne 'thinking' -or -not $script:continuousConversationEnabled -or
+        $script:secretaryPendingConfirmation -or $script:secretaryAuthorizedAction -or ($script:secretaryWork -and $script:secretaryWork.State -in @('dispatching','unknown')) -or
         $Turn.SessionId -cne $script:secretarySessionId -or [long]$Turn.Generation -ne $script:secretaryGeneration -or
         -not $Result -or $Result.ok -ne $true -or [string]$Result.turnId -cne [string]$Turn.TurnId -or [long]$Result.generation -ne [long]$Turn.Generation) { return $false }
     $snapshot=$Turn.Snapshot
     if (-not (Test-SecretarySnapshotCurrent $snapshot $Now)) { Set-SecretaryPhase 'error' '本轮任务候选快照已失效，没有执行任何动作。';return $false }
     $resolved=Resolve-SecretaryProposal $Result.proposal $snapshot $Now
     if (-not $resolved) { Set-SecretaryPhase 'error' '模型返回无法验证，本轮没有执行任何动作。';return $false }
-    if ($resolved.Kind -in @('chat','clarify')) { Write-SecretaryReply $resolved.Text;return $true }
+    if ($resolved.Kind -in @('chat','clarify')) {
+        $queued=Write-SecretaryModelReply $resolved.Text
+        if ($queued) { Set-SecretaryPhase 'speaking' '声伴正在说模型答复；收音已暂停。' }
+        elseif ($script:continuousConversationEnabled -and $script:secretaryPhase -eq 'thinking') {
+            Set-SecretaryPhase 'listening' '连续对话正在听。'
+            if (-not (Set-SecretaryCaptureMode conversation)) { Set-SecretaryPhase 'error' '连续收音未能恢复；本轮保持停止。' }
+        }
+        return $true
+    }
     $script:secretaryPendingConfirmation=$resolved
     $prompt=if($resolved.Action -eq 'switch_task'){'你要我切换到《'+$resolved.Title+'》吗？请说“是的”或“取消”。'}else{'你要我把“'+$resolved.WorkText+'”交给《'+$resolved.Title+'》吗？请说“是的”或“取消”。'}
     Write-SecretaryReply $prompt
     return $true
 }
 
-function Consume-SecretaryConfirmation([string]$Text,[DateTime]$Now=[DateTime]::UtcNow) {
+function Consume-SecretaryConfirmation([string]$Text,[DateTime]$Now=[DateTime]::UtcNow,[string]$ConfirmationTurnId='') {
     $pending=$script:secretaryPendingConfirmation
     if (-not $pending -or -not $script:continuousConversationEnabled -or $script:secretaryPhase -in @('off','paused','error')) { return [pscustomobject]@{Disposition='none'} }
-    if (-not (Test-SecretarySnapshotCurrent $pending.Snapshot $Now) -or $pending.SnapshotId -cne $pending.Snapshot.SnapshotId) {
+    if (-not (Test-SecretaryActionCurrent $pending $Now)) {
         $script:secretaryPendingConfirmation=$null
         return [pscustomobject]@{Disposition='expired'}
     }
     $answer=$Text.Trim()
     if ($answer -in @('是','是的','对','对的','确认','可以','好','好的')) {
         $script:secretaryPendingConfirmation=$null
-        $script:secretaryAuthorizedAction=$pending
+        if (-not $ConfirmationTurnId) { $ConfirmationTurnId=[Guid]::NewGuid().ToString('N') }
+        $authorized=[pscustomobject]@{Kind=$pending.Kind;Action=$pending.Action;CandidateKey=$pending.CandidateKey;ThreadId=$pending.ThreadId;Title=$pending.Title;
+            WorkText=$pending.WorkText;SessionId=$pending.SessionId;ConversationGeneration=$pending.ConversationGeneration;ProposalTurnId=$pending.ProposalTurnId;
+            ConfirmationTurnId=$ConfirmationTurnId;SnapshotId=$pending.SnapshotId;ExpiresAt=$pending.ExpiresAt;OriginalBindingGeneration=$pending.OriginalBindingGeneration;
+            Snapshot=$pending.Snapshot;Fingerprint=''}
+        $authorized.Fingerprint=Get-SecretaryActionFingerprint $authorized
+        if (-not (Test-SecretaryActionCurrent $authorized $Now -RequireConfirmation)) { return [pscustomobject]@{Disposition='expired'} }
+        $script:secretaryAuthorizedAction=$authorized
         Set-SecretaryPhase 'thinking' '正在核对真实任务状态…'
         [void](Set-SecretaryCaptureMode off)
-        return [pscustomobject]@{Disposition='confirmed';Action=$pending}
+        return [pscustomobject]@{Disposition='confirmed';Action=$authorized}
     }
     if ($answer -in @('不是','不对','不要','取消','算了')) {
         $script:secretaryPendingConfirmation=$null
@@ -346,7 +435,7 @@ function Handle-SecretaryTranscript([string]$Text,[DateTime]$Now=[DateTime]::Utc
         $script:secretaryIdleDeadlineUtc=$Now.AddSeconds([Math]::Max(30,[Math]::Min(600,[int]$script:conversationIdleSeconds)))
         Write-SecretaryLine '你' $Text
         Add-SecretaryHistory 'user' $Text
-        $confirmation=Consume-SecretaryConfirmation $Text $Now
+        $confirmation=Consume-SecretaryConfirmation $Text $Now ([Guid]::NewGuid().ToString('N'))
         if ($confirmation.Disposition -eq 'confirmed') { return Start-SecretaryAuthorizedAction $confirmation.Action }
         if ($confirmation.Disposition -in @('cancelled','expired')) { return $true }
         $turn=Begin-SecretaryTurn $Text $Now -AlreadyDisplayed -AlreadyCounted
@@ -381,7 +470,8 @@ function Complete-SecretaryCandidateList($Result,$Turn,[DateTime]$Now=[DateTime]
 
 function Start-SecretaryAuthorizedAction($Action) {
     if (-not $Action -or $Action.SnapshotId -cne $script:secretaryAuthorizedAction.SnapshotId -or
-        -not (Test-SecretarySnapshotCurrent $Action.Snapshot)) { Set-SecretaryPhase 'error' '确认快照已失效，没有执行动作。';return $false }
+        $Action.Fingerprint -cne $script:secretaryAuthorizedAction.Fingerprint -or
+        -not (Test-SecretaryActionCurrent $Action ([DateTime]::UtcNow) -RequireConfirmation)) { Set-SecretaryPhase 'error' '确认快照已失效，没有执行动作。';return $false }
     if ($script:manualTaskBinding -or $script:voiceTaskSwitch -or
         ((Get-Command Test-VoiceTaskCreateBlocksCurrentVoice -ErrorAction SilentlyContinue) -and (Test-VoiceTaskCreateBlocksCurrentVoice))) {
         Set-SecretaryPhase 'error' '另一项任务连接或创建仍待处理，没有执行或重复派发。'
@@ -397,12 +487,12 @@ function Start-SecretaryAuthorizedAction($Action) {
 function Test-SecretaryLiveCandidate($Candidate,$Result) {
     return [bool]($Candidate -and $Result -and $Result.ok -eq $true -and $Result.threadId -is [string] -and
         $Result.threadId -ceq [string]$Candidate.ThreadId -and $Result.title -is [string] -and
-        [string]::Equals(([string]$Result.title).Trim(),([string]$Candidate.Title).Trim(),[StringComparison]::Ordinal) -and
+        [string]::Equals((ConvertTo-SecretaryCandidateTitle $Result.title),(ConvertTo-SecretaryCandidateTitle $Candidate.Title),[StringComparison]::Ordinal) -and
         $Result.archived -ne $true -and $Result.bindingState -notin @('archived','missing') -and (-not $Result.hostId -or $Result.hostId -eq 'local'))
 }
 
 function Complete-SecretaryLiveAction($Result,$Action,[DateTime]$Now=[DateTime]::UtcNow) {
-    if (-not $Action -or -not (Test-SecretarySnapshotCurrent $Action.Snapshot $Now) -or
+    if (-not $Action -or -not (Test-SecretaryActionCurrent $Action $Now -RequireConfirmation) -or
         [long]$Action.OriginalBindingGeneration -ne [long]$script:bindingGeneration -or -not (Test-SecretaryLiveCandidate $Action $Result)) {
         Set-SecretaryPhase 'error' '目标任务已变化、归档或失效，没有执行动作。'
         return $false
@@ -436,20 +526,26 @@ function Complete-SecretaryWorkReceipt($Job,[string]$ReceiptState) {
     if (-not $Job -or -not $Job.SecretaryWorkContext) { return $false }
     $context=$Job.SecretaryWorkContext
     if (-not $script:secretaryWork -or [string]$script:secretaryWork.RequestId -cne [string]$context.RequestId -or $script:secretaryWork.State -ne 'dispatching') { return $false }
+    $active=[bool]($script:continuousConversationEnabled -and $script:secretaryPhase -eq 'thinking' -and
+        [string]$context.SessionId -ceq [string]$script:secretarySessionId -and [long]$context.Generation -eq [long]$script:secretaryGeneration)
     if ($ReceiptState -eq 'accepted') {
         $script:secretaryWork.State='accepted'
-        Write-SecretaryReply ('已交付给《'+$context.Title+'》。')
+        $message='已交付给《'+$context.Title+'》。'
+        if ($active) { Write-SecretaryReply $message }
+        else { Set-SecretaryOperationStatus $message;Write-SecretaryLine '声伴状态' $message }
     } elseif ($ReceiptState -eq 'rejected') {
         $script:secretaryWork.State='rejected'
-        Write-SecretaryLine '声伴' ('《'+$context.Title+'》没有接收这项工作，未自动重试。')
-        if ($script:continuousConversationEnabled) {
+        $message='《'+$context.Title+'》没有接收这项工作，未自动重试。'
+        Set-SecretaryOperationStatus $message;Write-SecretaryLine '声伴状态' $message
+        if ($active) {
             Set-SecretaryPhase 'listening' '工作未被接收；连续对话仍在听。'
             if (-not (Set-SecretaryCaptureMode conversation)) { Set-SecretaryPhase 'error' '连续收音未能恢复；工作没有自动重派。' }
         }
     } else {
         $script:secretaryWork.State='unknown'
-        Write-SecretaryLine '声伴' ('《'+$context.Title+'》的接收结果未知，请到 Codex 核对；不会自动重派。')
-        if ($script:continuousConversationEnabled) { Set-SecretaryPhase 'error' '工作接收结果未知；已暂停连续对话，避免重复派发。' }
+        $message='《'+$context.Title+'》的接收结果未知，请到 Codex 核对；不会自动重派。'
+        Set-SecretaryOperationStatus $message;Write-SecretaryLine '声伴状态' $message
+        if ($active) { Set-SecretaryPhase 'error' '工作接收结果未知；已暂停连续对话，避免重复派发。' }
     }
     return $true
 }

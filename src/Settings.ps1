@@ -20,6 +20,7 @@ function Initialize-AssistantSettings {
             if ($settings.modelName -is [string] -and $settings.modelName.Length -le 200) { $script:modelName=[string]$settings.modelName }
             if ($settings.modelAuthMode -in @('bearer','none')) { $script:modelAuthMode=[string]$settings.modelAuthMode }
             if ($settings.modelCredentialEnv -is [string] -and $settings.modelCredentialEnv -cmatch '\A[A-Za-z_][A-Za-z0-9_]{0,127}\z') { $script:modelCredentialEnv=[string]$settings.modelCredentialEnv }
+            if ($script:modelAuthMode -eq 'none') { $script:modelCredentialEnv='' }
             if ($null -ne $settings.modelDataConsent) { $script:modelDataConsent=[bool]$settings.modelDataConsent }
             if ($null -ne $settings.conversationTtsConsent) { $script:conversationTtsConsent=[bool]$settings.conversationTtsConsent }
             if ($null -ne $settings.conversationIdleSeconds) { $script:conversationIdleSeconds=[Math]::Max(30,[Math]::Min(600,[int]$settings.conversationIdleSeconds)) }
@@ -43,6 +44,7 @@ function Initialize-AssistantSettings {
 }
 
 function Save-Settings {
+    if ($script:modelAuthMode -eq 'none') { $script:modelCredentialEnv='' }
     $preferences=@{version=9;threadId=$script:threadId;voice=$script:voiceId;speechRate=$script:speechRate;autoRead=$script:autoRead;autoSend=$script:autoSend;handsFreeEnabled=$script:handsFreeEnabled;bargeInEnabled=$script:bargeInEnabled;shortFollowUpEnabled=$script:shortFollowUpEnabled;noWakeMode='off';continuousConversationEnabled=$false;modelEndpoint=$script:modelEndpoint;modelName=$script:modelName;modelAuthMode=$script:modelAuthMode;modelCredentialEnv=$script:modelCredentialEnv;modelDataConsent=[bool]$script:modelDataConsent;conversationTtsConsent=[bool]$script:conversationTtsConsent;conversationIdleSeconds=[int]$script:conversationIdleSeconds;conversationMaxSeconds=[int]$script:conversationMaxSeconds;conversationMaxTurns=[int]$script:conversationMaxTurns;wakePhrase=$script:wakePhrase;waveStyle=$script:waveStyle;waveSize=$script:waveSize;pinned=$script:pinned;captionsVisible=$script:captionsVisible;floatingVisible=$script:floatingVisible;directoryFilter=$script:directoryFilter}
     if ($window -and -not [double]::IsNaN($window.Left) -and -not [double]::IsNaN($window.Top)) { $preferences.left=$window.Left; $preferences.top=$window.Top }
     Write-AtomicJson -Path $settingsPath -Value $preferences -Depth 4
