@@ -5,7 +5,7 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 $version=Get-AssistantVersion -Root $projectRoot
 $readme=[IO.File]::ReadAllText((Join-Path $projectRoot 'README.md'))
 $changes=[IO.File]::ReadAllText((Join-Path $projectRoot 'CHANGELOG.md'))
-if ($readme -notmatch ('当前开发版 \*\*v6 / '+[regex]::Escape($version)+'\*\*') -or
+if ($readme -notmatch ('当前开发版 \*\*v[0-9]+ / '+[regex]::Escape($version)+'\*\*') -or
     [regex]::Match($changes,'(?m)^## ([0-9]+\.[0-9]+\.[0-9]+)').Groups[1].Value -ne $version) {
     throw 'README 当前版本或 CHANGELOG 最新条目与 VERSION 不一致，请先更新版本说明。'
 }
